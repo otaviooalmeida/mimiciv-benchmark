@@ -56,10 +56,8 @@ class DiffusionEmbedding(nn.Module):
 class ResNet(nn.Module):
     def __init__(self, config, device):
             super().__init__()
-            var, target_var = pickle.load(open('preprocess/data/var.pkl', 'rb'))
+            var, _ = pickle.load(open('preprocess/data/var.pkl', 'rb'))
             lv = len(var)
-            self.size_x = config['size']
-            self.size_y = 10 * len(target_var)
             self.channels = config['channels']
             self.emb_f = nn.Embedding(lv + 1, self.channels).to(device)
             self.emb_t = TimeEmbedding(config['time_points'], config['time_embedding_dim'], device)
@@ -75,19 +73,20 @@ class ResNet(nn.Module):
     def forward(self, samples_x, samples_y, info, diffusion_step):
         diffusion_emb = self.diffusion_embedding(diffusion_step)
         diffusion_emb = self.diffusion_projection(diffusion_emb)
-        diffusion_emb = diffusion_emb.unsqueeze(1).expand(diffusion_emb.shape[0], self.size_x, diffusion_emb.shape[1])
+        diffusion_emb = diffusion_emb.unsqueeze(1)
+        diffusion_emb_x = diffusion_emb.expand(-1, samples_x.shape[-1], -1)
         triplets_x = (self.emb_f(samples_x[:, 0].to(torch.int64))
                     + self.emb_t(samples_x[:, 1].to(torch.int64))
                     + self.emb_v(samples_x[:, 2].unsqueeze(-1))
-                    + diffusion_emb) * samples_x[:, 3].unsqueeze(-1)
+                    + diffusion_emb_x) * samples_x[:, 3].unsqueeze(-1)
         triplets_y = (self.emb_f(samples_y[:, 0].to(torch.int64))
                     + self.emb_t(samples_y[:, 1].to(torch.int64))
                     + self.emb_v(samples_y[:, 2].unsqueeze(-1))
                     ) * samples_y[:, 3].unsqueeze(-1)
-        diffussion_emb_y = diffusion_emb[:, : self.size_y] * samples_y[:, 3].unsqueeze(-1)
+        diffusion_emb_y = diffusion_emb.expand(-1, samples_y.shape[-1], -1) * samples_y[:, 3].unsqueeze(-1)
         skip = []
         for layer in self.residual_layers:
-            triplets_y = triplets_y + diffussion_emb_y
+            triplets_y = triplets_y + diffusion_emb_y
             triplets_y, skip_connection = layer(triplets_x, triplets_y)
             skip.append(skip_connection)
             
@@ -96,7 +95,7 @@ class ResNet(nn.Module):
         output = F.relu(output)
         output = self.dec2(output)
         
-        return output.squeeze()
+        return output.squeeze(1)
 
 class Triplet_cor(nn.Module):
     def __init__(self, config, lv, device):

@@ -22,8 +22,6 @@ def train(
     lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=m[1:], gamma=0.8)
     # earlystopping count
     ct = 0
-    _, target_var = pickle.load(open('preprocess/data/var.pkl', 'rb'))
-    size_y = 10 * len(target_var)
     best_valid_loss = np.inf
     for epoch_no in range(config['train']['epochs']):
         avg_loss = 0
@@ -31,7 +29,7 @@ def train(
         with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, train_batch in enumerate(it, start=1):
                 optimizer.zero_grad()
-                loss = model(train_batch, config['diffusion']['size'], size_y)
+                loss = model(train_batch)
                 loss.backward()
                 avg_loss += loss.item()
                 optimizer.step()

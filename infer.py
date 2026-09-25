@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from dataset import get_dataloader
 from diff import TDSTF
 from exe import calc_metrics
+from preprocess.windowing import HISTORY_MINUTES, FORECAST_MINUTES, WINDOW_MINUTES
 
 
 TARGET_UNITS = {"HR": "bpm", "SBP": "mmHg", "DBP": "mmHg", "Temperature": "°C", "O2 Saturation": "%"}
@@ -33,7 +34,7 @@ def parse_args():
     )
     parser.add_argument("--device", default=None, help="Ex.: cuda:0 ou cpu. Padrão: CUDA se disponível.")
     parser.add_argument("--nsample", type=int, default=100, help="Amostras de difusão por previsão.")
-    parser.add_argument("--n-examples", type=int, default=3, help="Número de internações a plotar em detalhe.")
+    parser.add_argument("--n-examples", type=int, default=3, help="Número de janelas a plotar em detalhe.")
     parser.add_argument("--output-dir", default=None, help="Pasta de saída (padrão: ao lado do checkpoint).")
     parser.add_argument("--seed", type=int, default=2026, help="Semente para reproduzir as amostras.")
     return parser.parse_args()
@@ -92,6 +93,7 @@ def prediction_rows(generation, samples_y, info, variable_names, target_ids, mea
                 actual = float(unscale(actuals[position], feature_id, means, stds))
                 rows.append({
                     "sample_id": sample_id,
+                    "window_start": int(metadata[sample_index, 3]),
                     "signal": variable_names[feature_id],
                     "minute": float(minutes[position]),
                     "actual": actual,
@@ -104,7 +106,7 @@ def prediction_rows(generation, samples_y, info, variable_names, target_ids, mea
 
 
 def save_predictions_csv(rows, path):
-    columns = ["sample_id", "signal", "minute", "actual", "predicted_median", "predicted_mean", "predicted_p025", "predicted_p975"]
+    columns = ["sample_id", "window_start", "signal", "minute", "actual", "predicted_median", "predicted_mean", "predicted_p025", "predicted_p975"]
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=columns)
         writer.writeheader()
@@ -115,6 +117,7 @@ def plot_example(sample_index, generation, samples_y, samples_x, info, variable_
                  target_ids, means, stds, output_path):
     gen, target, history = generation[sample_index].numpy(), samples_y[sample_index].numpy(), samples_x[sample_index].numpy()
     sample_id = int(info[sample_index, 0])
+    window_start = int(info[sample_index, 3])
     fig, axes = plt.subplots(
         len(target_ids), 1, figsize=(10, max(9, 2.7 * len(target_ids))),
         sharex=True, squeeze=False,
@@ -152,13 +155,13 @@ def plot_example(sample_index, generation, samples_y, samples_x, info, variable_
         else:
             ax.text(0.5, 0.5, "Sem observações alvo deste sinal", ha="center", va="center", transform=ax.transAxes)
 
-        ax.axvline(30, color="#777777", linestyle="--", linewidth=1, alpha=0.75)
+        ax.axvline(HISTORY_MINUTES, color="#777777", linestyle="--", linewidth=1, alpha=0.75)
         ax.set_ylabel(signal_label(variable_names[feature_id]))
         ax.grid(axis="y", alpha=0.2)
 
-    axes[0].set_title(f"Previsão no conjunto de teste — internação {sample_id}")
-    axes[-1].set_xlabel("Minuto relativo ao início da janela de 40 minutos")
-    axes[-1].set_xlim(0, 40)
+    axes[0].set_title(f"Previsão no conjunto de teste — internação {sample_id}, janela no minuto {window_start}")
+    axes[-1].set_xlabel(f"Minuto relativo ao início da janela de {WINDOW_MINUTES} minutos")
+    axes[-1].set_xlim(0, WINDOW_MINUTES)
     legend = [
         Patch(facecolor="#2878b5", edgecolor="#2878b5", alpha=0.8, label="Real observado"),
         Patch(facecolor="#5aa1d6", edgecolor="#2878b5", alpha=0.55, label="Distribuição predita"),
@@ -244,6 +247,8 @@ def main():
         "device": device,
         "nsample": args.nsample,
         "test_samples": int(generation.shape[0]),
+        "history_minutes": HISTORY_MINUTES,
+        "forecast_minutes": FORECAST_MINUTES,
         "SACRPS": float(sacrps),
         "MSE": float(mse.item() if torch.is_tensor(mse) else mse),
     }
@@ -260,9 +265,10 @@ def main():
 
     for sample_index in range(min(args.n_examples, len(generation))):
         sample_id = int(info[sample_index, 0])
+        window_start = int(info[sample_index, 3])
         plot_example(
             sample_index, generation, samples_y, samples_x, info, variable_names,
-            target_ids, means, stds, output_dir / f"forecast_example_{sample_id}.png",
+            target_ids, means, stds, output_dir / f"forecast_example_{sample_id}_window_{window_start}.png",
         )
     signal_names = [variable_names[int(index)] for index in target_ids]
     plot_signal_distribution(rows, signal_names, output_dir / "signal_distribution_violin.png")

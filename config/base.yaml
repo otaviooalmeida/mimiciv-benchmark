@@ -7,11 +7,11 @@ train:
   lr: 1.0e-3 
 
 diffusion:
-  size: 60 
+  size: 60 # Maximum number of selected history observations, not minutes.
   layers: 3 
   channels: 128 
   nheads: 8 
-  time_points: 40 
+  time_points: 80 # 60 minutes of history + 20 minutes to forecast.
   diffusion_embedding_dim: 128
   time_embedding_dim: 128
   beta_start: 0.0001

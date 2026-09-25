@@ -26,11 +26,11 @@ class TDSTF(nn.Module):
         
         return samples_x, samples_y, info
 
-    def forward(self, batch, size_x, size_y):
+    def forward(self, batch):
         samples_x, samples_y, info = self.process(batch)
         t = torch.randint(0, self.num_steps, [len(samples_x)]).to(self.device)
         current_alpha = self.alpha_torch[t]
-        noise = torch.randn((len(samples_x), size_y)).to(samples_y.device)
+        noise = torch.randn_like(samples_y[:, 2])
         mask_x = samples_x[:, 3]
         mask_y = samples_y[:, 3]
         samples_x[:, 0] = torch.where(mask_x == 1, samples_x[:, 0], self.lv)

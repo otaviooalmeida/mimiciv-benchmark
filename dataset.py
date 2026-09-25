@@ -2,15 +2,22 @@ import pickle
 import numpy as np
 import pandas as pd
 from torch.utils.data import DataLoader, Dataset
+from preprocess.windowing import FORECAST_MINUTES, HISTORY_MINUTES, WINDOW_MINUTES
 
 def triplet_generate(data, info, size, target_var):
     triplets_x = np.zeros((len(data), 4, size))
-    triplets_y = np.zeros((len(data), 4, 10 * len(target_var)))
+    triplets_y = np.zeros((len(data), 4, FORECAST_MINUTES * len(target_var)))
     
     for i in range(len(data)):
         pos = 0
-        x_len = info.iloc[i]['x_len']
-        y_len = info.iloc[i]['y_len']
+        x_len = int(info.iloc[i]['x_len'])
+        y_len = int(info.iloc[i]['y_len'])
+        x_times = np.asarray(data[i][1][:x_len])
+        y_times = np.asarray(data[i][1][x_len:x_len + y_len])
+        if (y_len > triplets_y.shape[-1]
+                or np.any((x_times < 0) | (x_times >= HISTORY_MINUTES))
+                or np.any((y_times < HISTORY_MINUTES) | (y_times >= WINDOW_MINUTES))):
+            raise ValueError('Invalid 60+20 minute sample. Rerun preprocess/step_2.py through step_4.py.')
         triplets_y[i, 3, :y_len] = 1
         for j in range(y_len):
             for k in range(3):
@@ -70,8 +77,10 @@ def triplet_generate(data, info, size, target_var):
                     
 class MIMIC_Dataset(Dataset):
     def __init__(self, data, info, size, target_var, use_index_list=None):
+        if 'window_start' not in info.columns:
+            raise ValueError('Outdated dataset. Rerun preprocess/step_2.py through step_4.py for 60+20 minute windows.')
         self.samples_x, self.samples_y, self.info = triplet_generate(data, info, size, target_var)
-        self.info = np.array(self.info.drop(columns=['sub_id']))
+        self.info = self.info[['ts_ind', 'x_len', 'y_len', 'window_start']].to_numpy(copy=True)
         self.use_index_list = np.arange(len(self.samples_x))
     
     def __getitem__(self, org_index):
