@@ -5,14 +5,15 @@ import pickle
 pd.set_option('mode.chained_assignment', None)
 
 # Read extracted time series data.
-events = pd.read_csv('data/mimic_iii_events.csv', low_memory = False, usecols=['HADM_ID', 'ICUSTAY_ID', 'CHARTTIME', 'VALUENUM', 'TABLE', 'NAME'])
-icu = pd.read_csv('data/mimic_iii_icu.csv')
+events = pd.read_csv('data/mimic_iv_events.csv', low_memory = False, usecols=['HADM_ID', 'ICUSTAY_ID', 'CHARTTIME', 'VALUENUM', 'TABLE', 'NAME'])
+icu = pd.read_csv('data/mimic_iv_icu.csv')
 # Convert times to type datetime.
 events.CHARTTIME = pd.to_datetime(events.CHARTTIME)
 icu.INTIME = pd.to_datetime(icu.INTIME)
 icu.OUTTIME = pd.to_datetime(icu.OUTTIME)
 
-# Assign ICUSTAY_ID to rows without it. Remove rows that can't be assigned one.
+# Labs have no stay_id: assign by admission and ICU time interval, as before.
+# Keep the stay_id already supplied by ICU tables. Drop unassignable rows.
 icu['icustay_times'] = icu.apply(lambda x:[x.ICUSTAY_ID, x.INTIME, x.OUTTIME], axis=1)
 adm_icu_times = icu.groupby('HADM_ID').agg({'icustay_times':list}).reset_index()
 icu.drop(columns=['icustay_times'], inplace=True)

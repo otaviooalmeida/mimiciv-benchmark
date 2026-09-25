@@ -3,29 +3,34 @@ from tqdm import tqdm
 import numpy as np
 pd.set_option('mode.chained_assignment', None)
 
-mimic_data_dir = 'MIMICIII/'
+mimic_data_dir = 'MIMICIV/'
+
+# Keep the existing internal column names for the rest of the pipeline.
+def legacy_column_name(column):
+    return 'ICUSTAY_ID' if column == 'stay_id' else column.upper()
 
 # Get all ICU stays.
-icu = pd.read_csv(mimic_data_dir+'ICUSTAYS.csv', usecols=['SUBJECT_ID', 'HADM_ID', 'ICUSTAY_ID', 'INTIME', 'OUTTIME'])
+icu = pd.read_csv(mimic_data_dir+'icu/icustays.csv', usecols=['subject_id', 'hadm_id', 'stay_id', 'intime', 'outtime'])
+icu.rename(columns=legacy_column_name, inplace=True)
 icu = icu.loc[icu.INTIME.notna()]
 icu = icu.loc[icu.OUTTIME.notna()]
 
-# Filter out pediatric patients.
-pat = pd.read_csv(mimic_data_dir+'PATIENTS.csv', usecols=['SUBJECT_ID', 'DOB', 'DOD', 'GENDER'])
+# Filter out pediatric patients. Ages over 89 are deidentified in anchor_age.
+pat = pd.read_csv(mimic_data_dir+'hosp/patients.csv', usecols=['subject_id', 'anchor_age', 'anchor_year', 'dod', 'gender'])
+pat.rename(columns=legacy_column_name, inplace=True)
 icu = icu.merge(pat, on='SUBJECT_ID', how='left')
 icu['INTIME'] = pd.to_datetime(icu.INTIME)
-icu['DOB'] = pd.to_datetime(icu.DOB)
-icu['AGE'] = icu.INTIME.map(lambda x:x.year) - icu.DOB.map(lambda x:x.year)
-icu = icu.loc[icu.AGE>=18] #53k icustays
+icu['AGE'] = icu.ANCHOR_AGE + icu.INTIME.dt.year - icu.ANCHOR_YEAR
+icu = icu.loc[icu.AGE>=18]
 
-# Extract chartevents for icu stays.
+# Extract chartevents for icu stays. MIMIC-IV has no ERROR column;
+# warning is not an equivalent error flag and is not used to exclude rows.
 ch = []
-for chunk in tqdm(pd.read_csv(mimic_data_dir+'CHARTEVENTS.csv', chunksize=10000000, low_memory = False,
-                usecols = ['HADM_ID', 'ICUSTAY_ID', 'ITEMID', 'CHARTTIME', 'VALUE', 'VALUENUM', 'VALUEUOM', 'ERROR'])):
+for chunk in tqdm(pd.read_csv(mimic_data_dir+'icu/chartevents.csv', chunksize=10000000, low_memory = False,
+                usecols = ['hadm_id', 'stay_id', 'itemid', 'charttime', 'value', 'valuenum', 'valueuom'])):
+    chunk.rename(columns=legacy_column_name, inplace=True)
     chunk = chunk.loc[chunk.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
-    chunk = chunk.loc[chunk['ERROR']!=1]
     chunk = chunk.loc[chunk.CHARTTIME.notna()]
-    chunk.drop(columns=['ERROR'], inplace=True)
     ch.append(chunk)
 del chunk
 ch = pd.concat(ch)
@@ -33,7 +38,8 @@ ch = ch.loc[~(ch.VALUE.isna() & ch.VALUENUM.isna())]
 ch['TABLE'] = 'chart'
 
 # Extract labevents for admissions.
-la = pd.read_csv(mimic_data_dir+'LABEVENTS.csv', usecols = ['HADM_ID', 'ITEMID', 'CHARTTIME', 'VALUE', 'VALUENUM', 'VALUEUOM'])
+la = pd.read_csv(mimic_data_dir+'hosp/labevents.csv', usecols = ['hadm_id', 'itemid', 'charttime', 'value', 'valuenum', 'valueuom'])
+la.rename(columns=legacy_column_name, inplace=True)
 la = la.loc[la.HADM_ID.isin(icu.HADM_ID)]
 la.HADM_ID = la.HADM_ID.astype(int)
 la = la.loc[la.CHARTTIME.notna()]
@@ -41,7 +47,8 @@ la = la.loc[~(la.VALUE.isna() & la.VALUENUM.isna())]
 la['ICUSTAY_ID'] = np.nan
 la['TABLE'] = 'lab'
 
-# Extract bp events. Remove outliers. Make sure median values of CareVue and MetaVision items are close.
+# Retain the existing feature mappings; absent legacy item IDs match no rows.
+# Extract bp events. Remove outliers.
 dbp = [8368, 220051, 225310, 8555, 8441, 220180, 8502, 8440, 8503, 8504, 8507, 8506, 224643, 227242]
 sbp = [51, 220050, 225309, 6701, 455, 220179, 3313, 3315, 442, 3317, 3323, 3321, 224167, 227243]
 mbp = [52, 220052, 225312, 224, 6702, 224322, 456, 220181, 3312, 3314, 3316, 3322, 3320, 443]
@@ -316,7 +323,8 @@ del ev_k
 del ch, la
 
 # Extract outputevents.
-oe = pd.read_csv(mimic_data_dir+'OUTPUTEVENTS.csv', usecols = ['ICUSTAY_ID', 'ITEMID', 'CHARTTIME', 'VALUE', 'VALUEUOM'])
+oe = pd.read_csv(mimic_data_dir+'icu/outputevents.csv', usecols = ['stay_id', 'itemid', 'charttime', 'value', 'valueuom'])
+oe.rename(columns=legacy_column_name, inplace=True)
 oe = oe.loc[oe.VALUE.notna()]
 oe['VALUENUM'] = oe.VALUE
 oe.VALUE = None
@@ -324,8 +332,9 @@ oe = oe.loc[oe.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
 oe.ICUSTAY_ID = oe.ICUSTAY_ID.astype(int)
 oe['TABLE'] = 'output'
 
-# Extract information about output items from D_ITEMS.csv.
-items = pd.read_csv(mimic_data_dir+'D_ITEMS.csv', usecols=['ITEMID', 'LABEL', 'ABBREVIATION', 'UNITNAME', 'PARAM_TYPE'])
+# Extract information about output items from d_items.csv.
+items = pd.read_csv(mimic_data_dir+'icu/d_items.csv', usecols=['itemid', 'label', 'abbreviation', 'unitname', 'param_type'])
+items.rename(columns=legacy_column_name, inplace=True)
 items.loc[items.LABEL.isna(), 'LABEL'] = ''
 items.LABEL = items.LABEL.str.lower()
 oeitems = oe[['ITEMID']].drop_duplicates()
@@ -370,18 +379,11 @@ for k, v in features.items():
     events = pd.concat([events, ev_k])
 del ev_k
 
-# Extract CV and MV inputevents.
-ie_cv = pd.read_csv(mimic_data_dir+'INPUTEVENTS_CV.csv', low_memory = False,
-    usecols = ['ICUSTAY_ID', 'ITEMID', 'CHARTTIME', 
-               'AMOUNT', 'AMOUNTUOM'])
-ie_cv['TABLE'] = 'input_cv'
-ie_cv = ie_cv.loc[ie_cv.AMOUNT.notna()]
-ie_cv = ie_cv.loc[ie_cv.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
-ie_cv.CHARTTIME = pd.to_datetime(ie_cv.CHARTTIME)
-
-ie_mv = pd.read_csv(mimic_data_dir+'INPUTEVENTS_MV.csv', low_memory = False,
-    usecols = ['ICUSTAY_ID', 'ITEMID', 'STARTTIME', 'ENDTIME',
-               'AMOUNT', 'AMOUNTUOM'])
+# MIMIC-IV inputevents contains only MetaVision data.
+ie_mv = pd.read_csv(mimic_data_dir+'icu/inputevents.csv', low_memory = False,
+    usecols = ['stay_id', 'itemid', 'starttime', 'endtime',
+               'amount', 'amountuom'])
+ie_mv.rename(columns=legacy_column_name, inplace=True)
 ie_mv = ie_mv.loc[ie_mv.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
 
 # Split MV intervals hourly.
@@ -408,9 +410,8 @@ del new_ie_mv
 ie_mv['TABLE'] = 'input_mv' 
 ie_mv.rename(columns={'ENDTIME':'CHARTTIME'}, inplace=True)
 
-# Combine CV and MV inputevents.
-ie = pd.concat((ie_cv, ie_mv))
-del ie_cv, ie_mv
+ie = ie_mv
+del ie_mv
 ie.rename(columns={'AMOUNT':'VALUENUM', 'AMOUNTUOM':'VALUEUOM'}, inplace=True)
 events.CHARTTIME = pd.to_datetime(events.CHARTTIME)
 
@@ -693,7 +694,8 @@ events = pd.concat([events, ev_k])
 del ev_k
 
 # Extract weight events from MV inputevents.
-ie_mv = pd.read_csv(mimic_data_dir+'INPUTEVENTS_MV.csv', usecols = ['ICUSTAY_ID', 'STARTTIME', 'PATIENTWEIGHT'])
+ie_mv = pd.read_csv(mimic_data_dir+'icu/inputevents.csv', usecols = ['stay_id', 'starttime', 'patientweight'])
+ie_mv.rename(columns=legacy_column_name, inplace=True)
 ie_mv = ie_mv.drop_duplicates()
 ie_mv = ie_mv.loc[ie_mv.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
 ie_mv.rename(columns={'STARTTIME':'CHARTTIME', 'PATIENTWEIGHT':'VALUENUM'}, inplace=True)
@@ -704,5 +706,5 @@ events = pd.concat([events, ie_mv])
 del ie_mv
 
 # Save data.
-events.to_csv('data/mimic_iii_events.csv', index=False)
-icu.to_csv('data/mimic_iii_icu.csv', index=False)
+events.to_csv('data/mimic_iv_events.csv', index=False)
+icu.to_csv('data/mimic_iv_icu.csv', index=False)
