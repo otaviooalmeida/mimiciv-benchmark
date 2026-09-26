@@ -16,38 +16,82 @@ Create `save/`, `preprocess/data/`, and `preprocess/data/first/`.
 Place the extracted MIMIC-IV CSVs in `preprocess/MIMICIV/` (`icu/` and `hosp/`).
 Run `step_1.py` through `step_4.py` in order from `preprocess/`.
 
-## Preprocessing memory controls
+## Disk-backed preprocessing and datasets
 
-`step_3.py` processes one input partition at a time by default, without child
-processes, and writes at most 1,000 accepted windows per `samples_*.pkl` file.
-All eligible sliding windows are retained; chunking does not change selection.
-For more parallelism or smaller output buffers, run from `preprocess/`:
+Steps 3/4 and the training DataLoader no longer accumulate all windows or all
+normalized tensors in RAM. Pandas, NumPy and PyTorch remain in use; no new
+third-party storage dependency is required.
+
+- **Step 2:** stores events once in read-only mmap-compatible arrays under
+  `data/events_*/`. `data/sets.pkl` is a small versioned manifest, not a list of
+  DataFrames. Per-stay ordering retains the previous Pandas sorting semantics.
+- **Step 3:** reads only the event ranges needed for each 30+10-minute window,
+  even for long stays. It writes eight int64 metadata/offset fields per accepted
+  window, not copies of the observations. `data/first/manifest.pkl` identifies
+  the completed `data/windows_*/` snapshot. Workers receive offsets, not tables.
+- **Step 4:** groups window indices with an on-disk SQLite index (Python standard
+  library). Temporary per-variable files replace the old in-memory `rec` lists.
+  Statistics are reduced in NumPy-sized buffers. It saves split indices under
+  `data/dataset_*/`, a small `data/dataset.pkl` manifest and `data/mean_std.pkl`.
+- **Dataset:** `get_dataloader()` reads the manifest automatically. Each sample
+  reads its event ranges, normalizes them and applies the same history selection
+  and masks as before. No whole-cohort `samples_x`/`samples_y` allocation occurs.
+
+For an existing installation that exhausted RAM, **rerun the updated step 2**
+(step 1 output can be reused):
 
 ```bash
-python3 step_3.py --workers 2 --chunk-size 500
+cd preprocess
+python3 step_2.py
+python3 step_3.py --workers 1 --chunk-size 1000
+python3 step_4.py
+cd ..
+python3 main.py
 ```
 
-At most `--workers` tasks are submitted at once. More workers increase memory
-usage; start with the default `--workers 1` after an out-of-memory failure.
-`step_4.py` can consume these chunk files without a format change.
+`--chunk-size` now limits buffered **index rows**, not observations or the number
+of retained windows. `--workers` defaults to 1 and limits pending tasks as well
+as running workers. Increase it only after measuring memory on your machine.
+After a failed step 3, rerun it to completion; step 4 rejects its incomplete
+snapshot rather than silently using partial outputs.
 
-New `step_2.py` output stores independent pickle records inside `data/sets.pkl`,
-with a target of 250,000 event rows per partition. ICU stays are never split:
-a single larger stay occupies its own partition. This is no longer a single
-pickled list; use `preprocess.partition_io.read_partitions()` to read it.
+**Benchmark semantics are preserved:** all eligible windows, required/optional
+signals, missing-value masks, history selection and 64/16/20 patient split remain
+unchanged. Normalization still uses **training + validation histories**, counts
+observations again for each overlapping window, uses population std (`ddof=0`),
+and retains the old zero-std/unseen-variable handling. Buffer-sized reductions
+preserve NumPy's rounding order, including constant/near-constant signals; parity
+tests compare original and disk-backed tensors and statistics exactly in the
+same NumPy environment. Defaults remain unseeded; `step_4.py --seed 2026` is an
+optional reproducible patient split, not a new splitting policy. Unseeded runs,
+changed numerical-library versions or nondeterministic GPU execution are not a
+promise of bit-for-bit training reproducibility.
 
-Existing list-format `sets.pkl` files are automatically converted atomically
-on the first `step_3.py` run, before workers receive data. **That one-time
-conversion still loads the old list into RAM and needs additional disk space
-for the replacement file.** If conversion itself runs out of RAM, rerun
-`step_2.py` to generate the new format. Subsequent runs read partitions lazily.
-After a failed step 3, rerun it to completion before running step 4; reruns
-remove old sample chunks and rebuild the quality report.
+**Compatibility and disk space:**
 
-These controls bound the in-flight partitions and output window buffers in
-**step 3**, not total pipeline memory: step 2 still loads the extracted events,
-and step 4 and training still load the full selected dataset. Memory also
-depends on the largest stay/window and per-worker Pandas temporaries.
+- Old `sets.pkl` files are **not** automatically loaded/converted by step 3.
+  `--legacy-input` explicitly enables conversion when the old input fits RAM;
+  it is not a low-memory workaround. Prefer regenerating it with step 2.
+- Step 4 can consume already-completed legacy `samples_*.pkl` files one at a
+  time. That compatibility path still needs enough RAM for the largest old
+  chunk. Legacy normalized `dataset.pkl` lists remain readable by the loader,
+  but only the new manifest path provides disk-backed sample loading.
+- Keep the **whole `data/` directory**, not just its pickle manifests. Paths
+  between snapshots are relative. Completed snapshots are published atomically
+  and retained on reruns so existing datasets do not change underneath training.
+  Remove old snapshots only after confirming no dataset/window manifest refers
+  to them. Do not mix variable metadata from different preprocessing runs.
+- Step 4 needs temporary disk space for its index and **8 bytes per historical
+  observation used in normalization, counting window repetitions**. These
+  temporary statistics and the SQLite index are removed after a successful run.
+  New window/event snapshots avoid permanent duplication of overlapping events.
+
+These changes address step 3, step 4 and input loading. Steps 1/2 still have
+in-memory Pandas operations; the diffusion model and final evaluation still have
+their own memory requirements (evaluation currently accumulates predictions).
+Memory also depends on the observations within a single window, patient-ID
+metadata, DataLoader shuffle indices and the number of workers. Run the RSS
+regression with `python3 -m pytest -q -s tests/test_disk_memory.py` on Linux.
 
 ## Temporal windows
 Each sample uses **30 minutes of history to forecast the following 10 minutes**:
@@ -90,7 +134,7 @@ Times are relative to each window. Maximum ages and gaps are inclusive. A failur
 
 Thresholds are initial research settings, **not clinically validated criteria**. Configure them in `config/windowing.yaml`, or run `python3 step_3.py --quality-config /path/to/windowing.yaml` from `preprocess/`. Omitted settings use the documented defaults. Tune using training/validation data, not test outcomes. Future coverage is an offline label-availability criterion, not an eligibility rule usable at forecast time; no selection depends on future changes or event labels. Two future observations do not establish absence of events between measurements.
 
-`preprocess/data/window_quality_report.json` records the horizon/stride, effective thresholds, accepted/rejected window counts, unique patients retained/lost, and rejection counts by rule. A window can fail multiple rules, so reason counts overlap. Candidates are only the 40-minute windows reached by a stay's last record; patients without any complete candidate are still counted among patients lost. Rerunning step 3 replaces its old `samples_*.pkl` outputs to avoid mixing cohorts. Inspect the report before step 4, especially if the stricter profile retains few patients.
+`preprocess/data/window_quality_report.json` records the horizon/stride, effective thresholds, accepted/rejected window counts, unique patients retained/lost, and rejection counts by rule. A window can fail multiple rules, so reason counts overlap. Candidates are only the 40-minute windows reached by a stay's last record; patients without any complete candidate are still counted among patients lost. Rerunning step 3 publishes a new window-index snapshot and removes legacy `samples_*.pkl` outputs to avoid mixing cohorts. Inspect the report before step 4, especially if the stricter profile retains few patients.
 
 ## History selection: guaranteed recent target observations
 

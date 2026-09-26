@@ -3,7 +3,8 @@ from tqdm import tqdm
 import numpy as np
 import pickle
 from windowing import TARGET_NAMES
-from partition_io import iter_stay_parts, write_partitions
+from partition_io import iter_stay_parts
+from storage import write_event_store
 pd.set_option('mode.chained_assignment', None)
 
 # Read extracted time series data.
@@ -104,5 +105,6 @@ target_var = np.array([var_to_ind[name] for name in target_names])
 events['vind'] = events.variable.map(var_to_ind)
 pickle.dump([var, target_var], open('data/var.pkl','wb'))
 
-# Store independently readable, row-budgeted parts; never split an ICU stay.
-write_partitions(iter_stay_parts(events), 'data/sets.pkl')
+# Store each event once in mmap-readable arrays. The manifest stays small;
+# step 3 no longer deserializes DataFrames or copies overlapping windows.
+write_event_store(iter_stay_parts(events), 'data/sets.pkl')

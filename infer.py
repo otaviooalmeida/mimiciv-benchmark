@@ -432,6 +432,11 @@ def main():
         batch_size=config["train"]["batch_size"],
         recent_per_target=config["diffusion"].get("recent_per_target", 3),
     )
+    # Disk-backed datasets pin their normalization snapshot. Do not mix it with
+    # a mean_std.pkl replaced by another preprocessing run.
+    manifest = getattr(test_loader_shuffled.dataset, 'manifest', None)
+    if manifest is not None:
+        means, stds = manifest['means'], manifest['stds']
     test_loader = DataLoader(
         test_loader_shuffled.dataset,
         batch_size=test_loader_shuffled.batch_size,

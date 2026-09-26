@@ -98,28 +98,10 @@ def iter_windows(data, target_var, required_var=None, *, quality=WindowQuality()
         minutes = stay.minute.to_numpy()
         variables = stay.vind.to_numpy(dtype=np.int64)
         values = stay.value.to_numpy(dtype=float)
-        is_target = np.isin(variables, target_var)
-        last_start = int(minutes[-1]) + 1 - WINDOW_MINUTES
-        for start in range(0, last_start + 1, STRIDE_MINUTES):
-            left, split, right = np.searchsorted(
-                minutes, [start, start + HISTORY_MINUTES, start + WINDOW_MINUTES]
-            )
-            report['candidate_windows'] += 1
-            failed = set()
-            for variable in required_var:
-                history = minutes[left:split][variables[left:split] == variable] - start
-                forecast = minutes[split:right][variables[split:right] == variable] - start
-                failed.update(quality.rejection_reasons(history, forecast))
-            y_indices = np.arange(split, right)[is_target[split:right]]
+        for start, left, split, right, y_indices in iter_window_indices(
+            minutes, variables, values, target_var, required_var, quality=quality, report=report,
+        ):
             indices = np.concatenate((np.arange(left, split), y_indices))
-            if not np.isfinite(values[indices]).all():
-                failed.add('nonfinite_values')
-            if failed:
-                report['rejected_windows'] += 1
-                report.update(failed)
-                continue
-            report['accepted_windows'] += 1
-
             x_len, y_len = split - left, len(y_indices)
             y_mask = np.zeros(len(indices))
             y_mask[x_len:] = 1
@@ -127,3 +109,42 @@ def iter_windows(data, target_var, required_var=None, *, quality=WindowQuality()
                 [variables[indices], minutes[indices] - start, values[indices], y_mask],
                 [int(stay_id), int(stay.sub_id.iloc[0]), int(x_len), y_len, start],
             )
+
+
+def iter_window_indices(minutes, variables, values, target_var, required_var, *, quality=WindowQuality(), report=None,
+                        release_pages=None):
+    """Same selection on sorted arrays or mmap views; allocate only one window.
+
+    In particular, never build an is_target mask for an entire long ICU stay.
+    The original iter_windows and the disk-backed step 3 share this logic.
+    """
+    target_var, required_var = tuple(target_var), tuple(required_var)
+    if not required_var or not set(required_var) <= set(target_var):
+        raise ValueError('required_var must be a nonempty subset of target_var.')
+    if report is None:
+        report = Counter()
+    if not len(minutes):
+        return
+    last_start = int(minutes[-1]) + 1 - WINDOW_MINUTES
+    for start in range(0, last_start + 1, STRIDE_MINUTES):
+        # Also release mappings in long stretches where every window is rejected.
+        if release_pages is not None and start % (256 * STRIDE_MINUTES) == 0:
+            release_pages()
+        left, split, right = np.searchsorted(
+            minutes, [start, start + HISTORY_MINUTES, start + WINDOW_MINUTES]
+        )
+        report['candidate_windows'] += 1
+        failed = set()
+        for variable in required_var:
+            history = minutes[left:split][variables[left:split] == variable] - start
+            forecast = minutes[split:right][variables[split:right] == variable] - start
+            failed.update(quality.rejection_reasons(history, forecast))
+        y_indices = np.flatnonzero(np.isin(variables[split:right], target_var)) + split
+        if not (np.isfinite(values[left:split]).all() and np.isfinite(values[y_indices]).all()):
+            failed.add('nonfinite_values')
+        if failed:
+            report['rejected_windows'] += 1
+            report.update(failed)
+            continue
+        report['accepted_windows'] += 1
+        yield start, left, split, right, y_indices
