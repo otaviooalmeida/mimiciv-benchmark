@@ -1,0 +1,21 @@
+# Illustrative research thresholds, NOT validated clinical alarm criteria.
+# Copy and justify/tune these on training/validation data, never on the test set.
+# Event: a rise/drop of at least min_change between consecutive measurements
+# of the same signal, separated by at most max_gap_minutes.
+# Values are in ORIGINAL units, not normalized model units.
+# Delete a signal to omit its event probabilities. Both directions use the same rule.
+HR:
+  min_change: 20        # bpm
+  max_gap_minutes: 5
+SBP:
+  min_change: 20        # mmHg
+  max_gap_minutes: 5
+DBP:
+  min_change: 15        # mmHg
+  max_gap_minutes: 5
+Temperature:
+  min_change: 0.5       # degrees Celsius
+  max_gap_minutes: 5
+O2 Saturation:
+  min_change: 4         # percentage points, not relative percent
+  max_gap_minutes: 5

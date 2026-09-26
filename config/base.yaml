@@ -1,16 +1,16 @@
-
 #type: args
 
 train:
   epochs: 200
-  batch_size: 32 
-  lr: 1.0e-3 
+  batch_size: 32
+  lr: 1.0e-3
 
 diffusion:
   size: 60 # Maximum number of selected history observations, not minutes.
-  layers: 3 
-  channels: 128 
-  nheads: 8 
+  recent_per_target: 3 # Reserve up to this many latest observations of each target signal.
+  layers: 3
+  channels: 128
+  nheads: 8
   time_points: 80 # 60 minutes of history + 20 minutes to forecast.
   diffusion_embedding_dim: 128
   time_embedding_dim: 128

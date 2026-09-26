@@ -23,7 +23,10 @@ os.makedirs(foldername, exist_ok=True)
 data_path = 'preprocess/data/dataset.pkl'
 var_path = 'preprocess/data/var.pkl'
 size = config['diffusion']['size']
-train_loader, valid_loader, test_loader = get_dataloader(data_path, var_path, size)
+train_loader, valid_loader, test_loader = get_dataloader(
+    data_path, var_path, size,
+    recent_per_target=config['diffusion'].get('recent_per_target', 3),
+)
 model = TDSTF(config, args.device).to(args.device)
 
 if args.modelfolder == '':
