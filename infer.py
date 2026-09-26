@@ -20,7 +20,7 @@ from exe import calc_metrics
 from preprocess.windowing import HISTORY_MINUTES, FORECAST_MINUTES, WINDOW_MINUTES
 
 
-TARGET_UNITS = {"HR": "bpm", "SBP": "mmHg", "DBP": "mmHg", "Temperature": "°C", "O2 Saturation": "%"}
+TARGET_UNITS = {"HR": "bpm", "SBP": "mmHg", "RR": "brpm", "Temperature": "°C", "O2 Saturation": "%"}
 TARGET_DISPLAY_NAMES = {"O2 Saturation": "SpO₂"}
 
 

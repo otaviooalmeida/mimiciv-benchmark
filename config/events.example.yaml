@@ -10,8 +10,8 @@ HR:
 SBP:
   min_change: 20        # mmHg
   max_gap_minutes: 5
-DBP:
-  min_change: 15        # mmHg
+RR:
+  min_change: 5         # breaths per minute (illustrative only)
   max_gap_minutes: 5
 Temperature:
   min_change: 0.5       # degrees Celsius

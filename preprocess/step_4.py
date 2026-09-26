@@ -14,6 +14,8 @@ for file in os.listdir('data/first'):
     samples += sr
     info += ir
 info = pd.DataFrame(info, columns=INFO_COLUMNS)
+if info.empty:
+    raise ValueError('No windows passed selection. Inspect data/window_quality_report.json before continuing.')
 
 # suject-wise data split
 subjects = np.unique(np.array(info['sub_id']))

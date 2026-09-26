@@ -2,7 +2,7 @@ import pandas as pd
 from tqdm import tqdm
 import numpy as np
 import pickle
-from windowing import split_stays
+from windowing import TARGET_NAMES, split_stays
 pd.set_option('mode.chained_assignment', None)
 
 # Read extracted time series data.
@@ -93,8 +93,9 @@ def inv_list(l):
     return d
 var_to_ind = inv_list(var)
 
-# target variables: keep the original vital signs and add Temperature and O2 Saturation (SpO2).
-target_names = ['HR', 'SBP', 'DBP', 'Temperature', 'O2 Saturation']
+# Predict HR, SBP and RR; Temperature and SpO2 are optional within each window.
+# DBP remains available as historical context, but is no longer a target.
+target_names = TARGET_NAMES
 missing_targets = [name for name in target_names if name not in var_to_ind]
 if missing_targets:
     raise ValueError('Target variables missing from extracted events: {}'.format(missing_targets))
