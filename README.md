@@ -16,6 +16,39 @@ Create `save/`, `preprocess/data/`, and `preprocess/data/first/`.
 Place the extracted MIMIC-IV CSVs in `preprocess/MIMICIV/` (`icu/` and `hosp/`).
 Run `step_1.py` through `step_4.py` in order from `preprocess/`.
 
+## Preprocessing memory controls
+
+`step_3.py` processes one input partition at a time by default, without child
+processes, and writes at most 1,000 accepted windows per `samples_*.pkl` file.
+All eligible sliding windows are retained; chunking does not change selection.
+For more parallelism or smaller output buffers, run from `preprocess/`:
+
+```bash
+python3 step_3.py --workers 2 --chunk-size 500
+```
+
+At most `--workers` tasks are submitted at once. More workers increase memory
+usage; start with the default `--workers 1` after an out-of-memory failure.
+`step_4.py` can consume these chunk files without a format change.
+
+New `step_2.py` output stores independent pickle records inside `data/sets.pkl`,
+with a target of 250,000 event rows per partition. ICU stays are never split:
+a single larger stay occupies its own partition. This is no longer a single
+pickled list; use `preprocess.partition_io.read_partitions()` to read it.
+
+Existing list-format `sets.pkl` files are automatically converted atomically
+on the first `step_3.py` run, before workers receive data. **That one-time
+conversion still loads the old list into RAM and needs additional disk space
+for the replacement file.** If conversion itself runs out of RAM, rerun
+`step_2.py` to generate the new format. Subsequent runs read partitions lazily.
+After a failed step 3, rerun it to completion before running step 4; reruns
+remove old sample chunks and rebuild the quality report.
+
+These controls bound the in-flight partitions and output window buffers in
+**step 3**, not total pipeline memory: step 2 still loads the extracted events,
+and step 4 and training still load the full selected dataset. Memory also
+depends on the largest stay/window and per-worker Pandas temporaries.
+
 ## Temporal windows
 Each sample uses **30 minutes of history to forecast the following 10 minutes**:
 - History: `[start, start + 30)`; targets: `[start + 30, start + 40)`.

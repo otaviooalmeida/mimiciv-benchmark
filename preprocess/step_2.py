@@ -2,7 +2,8 @@ import pandas as pd
 from tqdm import tqdm
 import numpy as np
 import pickle
-from windowing import TARGET_NAMES, split_stays
+from windowing import TARGET_NAMES
+from partition_io import iter_stay_parts, write_partitions
 pd.set_option('mode.chained_assignment', None)
 
 # Read extracted time series data.
@@ -103,6 +104,5 @@ target_var = np.array([var_to_ind[name] for name in target_names])
 events['vind'] = events.variable.map(var_to_ind)
 pickle.dump([var, target_var], open('data/var.pkl','wb'))
 
-# Split whole ICU stays, never rows from the same stay across workers.
-sets = split_stays(events, 20)
-pickle.dump(sets, open('data/sets.pkl','wb'))
+# Store independently readable, row-budgeted parts; never split an ICU stay.
+write_partitions(iter_stay_parts(events), 'data/sets.pkl')

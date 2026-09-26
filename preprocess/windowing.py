@@ -68,7 +68,16 @@ def split_stays(data, num_parts=20):
 
 
 def generate_windows(data, target_var, required_var=None, *, quality=WindowQuality(), report=None):
-    """Return 30+10 minute windows with per-required-signal coverage, stride 10.
+    """Collect windows for small callers; preprocessing uses iter_windows instead."""
+    samples, info = [], []
+    for sample, row in iter_windows(data, target_var, required_var, quality=quality, report=report):
+        samples.append(sample)
+        info.append(row)
+    return samples, info
+
+
+def iter_windows(data, target_var, required_var=None, *, quality=WindowQuality(), report=None):
+    """Yield 30+10 minute windows with per-required-signal coverage, stride 10.
 
     Input minutes are integer bins relative to ICU admission (step_2).
     History is [start, start+30); targets are [start+30, start+40).
@@ -84,7 +93,6 @@ def generate_windows(data, target_var, required_var=None, *, quality=WindowQuali
         raise ValueError('required_var must be a nonempty subset of target_var.')
     if report is None:
         report = Counter()
-    samples, info = [], []
     for stay_id, stay in data.groupby('ts_ind', sort=False):
         stay = stay.sort_values('minute')
         minutes = stay.minute.to_numpy()
@@ -115,8 +123,7 @@ def generate_windows(data, target_var, required_var=None, *, quality=WindowQuali
             x_len, y_len = split - left, len(y_indices)
             y_mask = np.zeros(len(indices))
             y_mask[x_len:] = 1
-            samples.append([
-                variables[indices], minutes[indices] - start, values[indices], y_mask
-            ])
-            info.append([int(stay_id), int(stay.sub_id.iloc[0]), int(x_len), y_len, start])
-    return samples, info
+            yield (
+                [variables[indices], minutes[indices] - start, values[indices], y_mask],
+                [int(stay_id), int(stay.sub_id.iloc[0]), int(x_len), y_len, start],
+            )
