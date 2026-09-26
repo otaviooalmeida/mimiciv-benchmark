@@ -17,16 +17,16 @@ Place the extracted MIMIC-IV CSVs in `preprocess/MIMICIV/` (`icu/` and `hosp/`).
 Run `step_1.py` through `step_4.py` in order from `preprocess/`.
 
 ## Temporal windows
-Each sample uses **60 minutes of history to forecast the following 20 minutes**:
-- History: `[start, start + 60)`; targets: `[start + 60, start + 80)`.
-- Sliding windows advance by **20 minutes**, starting at ICU admission. All valid windows are retained, not just the first per stay.
+Each sample uses **30 minutes of history to forecast the following 10 minutes**:
+- History: `[start, start + 30)`; targets: `[start + 30, start + 40)`.
+- Sliding windows advance by **10 minutes**, starting at ICU admission. All valid windows are retained, not just the first per stay.
 - Windows do not cross ICU stays; train/validation/test remain split by patient.
 - Observations retain their minute bins without interpolation. The last recorded minute of the stay must reach or exceed the final minute bin of a candidate window; coverage within it is checked separately below.
-- Targets are **HR, SBP, RR, Temperature and SpO2**. **HR, SBP and RR are required**; Temperature and SpO2 are optional within each window. DBP remains available as historical context, never as a future target. Missing target observations are masked; the output supports 20 observations per signal.
+- Targets are **HR, SBP, RR, Temperature and SpO2**. **HR, SBP and RR are required**; Temperature and SpO2 are optional within each window. DBP remains available as historical context, never as a future target. Missing target observations are masked; the output supports 10 observations per signal.
 
-Durations and stride are defined in `preprocess/windowing.py`. `diffusion.time_points` in `config/base.yaml` covers all 80 minutes. `diffusion.size` is the cap on selected history **observations**, not a duration.
+Durations and stride are defined in `preprocess/windowing.py`. `diffusion.time_points: 40` in `config/base.yaml` covers all 40 minutes. `diffusion.size` is the cap on selected history **observations**, not a duration.
 
-Existing preprocessed datasets must be regenerated for the new targets and stricter coverage (step 1 may be reused because it already extracts RR):
+Existing preprocessed datasets must be regenerated for the 30+10-minute horizon, new targets and stricter coverage (step 1 may be reused because it already extracts RR):
 
 ```bash
 cd preprocess
@@ -37,7 +37,7 @@ cd ..
 python3 main.py
 ```
 
-Retrain after changing targets or window eligibility. Do not reuse DBP-target checkpoints to evaluate RR, even if their tensor shapes match. Older 30+10-minute checkpoints also require retraining for the current horizon.
+Retrain after changing targets or window eligibility. Do not reuse DBP-target checkpoints to evaluate RR, even if their tensor shapes match. Checkpoints trained on 60+20-minute windows also require retraining for the current 30+10-minute horizon.
 Inference CSVs identify windows by `(sample_id, window_start)`, where `sample_id` is the ICU stay index and `window_start` is minutes since admission. Plot filenames include both identifiers.
 
 ## Window quality: required HR, SBP and RR coverage
@@ -47,17 +47,17 @@ Before history subsampling, `preprocess/step_3.py` checks **each** of HR, SBP an
 | Rule | Default |
 | --- | --- |
 | History observation count | At least 4 distinct observed minute bins per signal |
-| History distribution | At least one observation in each block: `[0,20)`, `[20,40)`, `[40,60)` |
-| History recency | Last observation at most 10 minutes before forecast onset: minute 50 or later |
-| History internal gaps | At most 20 minutes between consecutive observations of the same signal |
+| History distribution | At least one observation in each block: `[0,10)`, `[10,20)`, `[20,30)` |
+| History recency | Last observation at most 5 minutes before forecast onset: minute 25 or later |
+| History internal gaps | At most 10 minutes between consecutive observations of the same signal |
 | Future observation count | At least 2 distinct observed minute bins per signal |
-| Future distribution | At least one observation in each half: `[60,70)`, `[70,80)` |
+| Future distribution | At least one observation in each half: `[30,35)`, `[35,40)` |
 
 Times are relative to each window. Maximum ages and gaps are inclusive. A failure for **any required signal** rejects the whole window. Nonfinite values in the history or retained future targets also reject it. Temperature and SpO2 do not need minimum coverage; their available observations remain in the sample. DBP does not affect signal-coverage eligibility.
 
 Thresholds are initial research settings, **not clinically validated criteria**. Configure them in `config/windowing.yaml`, or run `python3 step_3.py --quality-config /path/to/windowing.yaml` from `preprocess/`. Omitted settings use the documented defaults. Tune using training/validation data, not test outcomes. Future coverage is an offline label-availability criterion, not an eligibility rule usable at forecast time; no selection depends on future changes or event labels. Two future observations do not establish absence of events between measurements.
 
-`preprocess/data/window_quality_report.json` records the effective thresholds, accepted/rejected window counts, unique patients retained/lost, and rejection counts by rule. A window can fail multiple rules, so reason counts overlap. Candidates are only the 80-minute windows reached by a stay's last record; patients without any complete candidate are still counted among patients lost. Rerunning step 3 replaces its old `samples_*.pkl` outputs to avoid mixing cohorts. Inspect the report before step 4, especially if the stricter profile retains few patients.
+`preprocess/data/window_quality_report.json` records the horizon/stride, effective thresholds, accepted/rejected window counts, unique patients retained/lost, and rejection counts by rule. A window can fail multiple rules, so reason counts overlap. Candidates are only the 40-minute windows reached by a stay's last record; patients without any complete candidate are still counted among patients lost. Rerunning step 3 replaces its old `samples_*.pkl` outputs to avoid mixing cohorts. Inspect the report before step 4, especially if the stricter profile retains few patients.
 
 ## History selection: guaranteed recent target observations
 
@@ -75,7 +75,7 @@ diffusion:
   recent_per_target: 3
 ```
 
-Both settings must be positive integers. If a window cannot fit all reserved observations within `size`, loading fails with instructions to increase the budget or reduce the reservation; the guarantee is never silently discarded. Sparse histories retain all available observations and use masked padding, without interpolation or invented measurements. "Latest" means latest **available within the 60-minute history**, not necessarily recently measured if a signal is sparse. Non-target context coverage remains best-effort under the budget.
+Both settings must be positive integers. If a window cannot fit all reserved observations within `size`, loading fails with instructions to increase the budget or reduce the reservation; the guarantee is never silently discarded. Sparse histories retain all available observations and use masked padding, without interpolation or invented measurements. "Latest" means latest **available within the 30-minute history**, not necessarily recently measured if a signal is sparse. Non-target context coverage remains best-effort under the budget.
 
 Selection only inspects historical variable IDs and timestamps, never future targets or values. It preserves the original sample arrays and future targets, and returns the selected history chronologically.
 

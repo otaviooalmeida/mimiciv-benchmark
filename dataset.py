@@ -70,7 +70,10 @@ def triplet_generate(data, info, size, target_var, recent_per_target=3):
                 or not np.isfinite(x_times).all() or not np.isfinite(y_times).all()
                 or np.any((x_times < 0) | (x_times >= HISTORY_MINUTES))
                 or np.any((y_times < HISTORY_MINUTES) | (y_times >= WINDOW_MINUTES))):
-            raise ValueError('Invalid 60+20 minute sample. Rerun preprocess/step_2.py through step_4.py.')
+            raise ValueError(
+                f'Invalid {HISTORY_MINUTES}+{FORECAST_MINUTES} minute sample. '
+                'Rerun preprocess/step_2.py through step_4.py.'
+            )
         selected = _select_history_indices(
             np.asarray(data[i][0][:x_len]), x_times, size, target_var, recent_per_target,
         )
@@ -86,7 +89,10 @@ def triplet_generate(data, info, size, target_var, recent_per_target=3):
 class MIMIC_Dataset(Dataset):
     def __init__(self, data, info, size, target_var, use_index_list=None, *, recent_per_target=3):
         if 'window_start' not in info.columns:
-            raise ValueError('Outdated dataset. Rerun preprocess/step_2.py through step_4.py for 60+20 minute windows.')
+            raise ValueError(
+                'Outdated dataset. Rerun preprocess/step_2.py through step_4.py '
+                f'for {HISTORY_MINUTES}+{FORECAST_MINUTES} minute windows.'
+            )
         self.samples_x, self.samples_y, self.info = triplet_generate(
             data, info, size, target_var, recent_per_target=recent_per_target,
         )

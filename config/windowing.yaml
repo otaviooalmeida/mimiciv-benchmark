@@ -3,8 +3,8 @@
 # Temperature and SpO2 are optional; DBP is historical context only.
 # Tune on training/validation data, not test outcomes.
 history_min_observations: 4
-history_block_minutes: 20       # At least one observation in each of 3 blocks.
-history_max_age_minutes: 10     # Age at forecast onset (minute 60); inclusive.
-history_max_gap_minutes: 20     # Largest internal gap between observations; inclusive.
+history_block_minutes: 10       # At least one observation in each of 3 blocks.
+history_max_age_minutes: 5      # Age at forecast onset (minute 30); inclusive.
+history_max_gap_minutes: 10     # Largest internal gap between observations; inclusive.
 forecast_min_observations: 2
-forecast_block_minutes: 10      # At least one observation in each forecast half.
+forecast_block_minutes: 5       # At least one observation in each forecast half.

@@ -8,9 +8,9 @@ import numpy as np
 TARGET_NAMES = ('HR', 'SBP', 'RR', 'Temperature', 'O2 Saturation')
 REQUIRED_TARGET_NAMES = ('HR', 'SBP', 'RR')
 
-HISTORY_MINUTES = 60
-FORECAST_MINUTES = 20
-STRIDE_MINUTES = 20
+HISTORY_MINUTES = 30
+FORECAST_MINUTES = 10
+STRIDE_MINUTES = 10
 WINDOW_MINUTES = HISTORY_MINUTES + FORECAST_MINUTES
 INFO_COLUMNS = ['ts_ind', 'sub_id', 'x_len', 'y_len', 'window_start']
 REJECTION_REASONS = (
@@ -24,11 +24,11 @@ class WindowQuality:
     """Coverage thresholds in minute bins, checked before history subsampling."""
 
     history_min_observations: int = 4
-    history_block_minutes: int = 20
-    history_max_age_minutes: int = 10
-    history_max_gap_minutes: int = 20
+    history_block_minutes: int = 10
+    history_max_age_minutes: int = 5
+    history_max_gap_minutes: int = 10
     forecast_min_observations: int = 2
-    forecast_block_minutes: int = 10
+    forecast_block_minutes: int = 5
 
     def __post_init__(self):
         for name, value in vars(self).items():
@@ -68,10 +68,10 @@ def split_stays(data, num_parts=20):
 
 
 def generate_windows(data, target_var, required_var=None, *, quality=WindowQuality(), report=None):
-    """Return 60+20 minute windows with per-required-signal coverage, stride 20.
+    """Return 30+10 minute windows with per-required-signal coverage, stride 10.
 
     Input minutes are integer bins relative to ICU admission (step_2).
-    History is [start, start+60); targets are [start+60, start+80).
+    History is [start, start+30); targets are [start+30, start+40).
     All targets are required unless required_var explicitly selects a subset.
     Optional targets are retained when observed, without interpolation.
     Only windows whose final minute bin has been reached are considered.

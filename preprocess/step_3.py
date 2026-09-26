@@ -10,7 +10,8 @@ from pathlib import Path
 import yaml
 
 from windowing import (
-    REJECTION_REASONS, REQUIRED_TARGET_NAMES, TARGET_NAMES, WindowQuality, generate_windows,
+    FORECAST_MINUTES, HISTORY_MINUTES, REJECTION_REASONS, REQUIRED_TARGET_NAMES,
+    STRIDE_MINUTES, TARGET_NAMES, WindowQuality, generate_windows,
 )
 
 
@@ -57,6 +58,9 @@ if __name__ == '__main__':
         'target_signals': TARGET_NAMES,
         'required_signals': REQUIRED_TARGET_NAMES,
         'quality': asdict(quality),
+        'history_minutes': HISTORY_MINUTES,
+        'forecast_minutes': FORECAST_MINUTES,
+        'stride_minutes': STRIDE_MINUTES,
         **{key: counts[key] for key in ('candidate_windows', 'accepted_windows', 'rejected_windows')},
         'patients_in_input': len(all_subjects),
         'patients_with_accepted_windows': len(kept_subjects),

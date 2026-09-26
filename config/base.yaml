@@ -11,7 +11,7 @@ diffusion:
   layers: 3
   channels: 128
   nheads: 8
-  time_points: 80 # 60 minutes of history + 20 minutes to forecast.
+  time_points: 40 # 30 minutes of history + 10 minutes to forecast.
   diffusion_embedding_dim: 128
   time_embedding_dim: 128
   beta_start: 0.0001
