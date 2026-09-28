@@ -103,6 +103,49 @@ def prediction_rows(generation, samples_y, info, variable_names, target_ids, mea
     return rows
 
 
+def mse_by_signal(generation, samples_y, variable_names, target_ids, means, stds):
+    """Compute point-forecast MSE per target, in normalized and clinical units."""
+    gen = generation.numpy()
+    target = samples_y.numpy()
+    valid = target[:, :, 3] > 0
+    feature_ids = target[:, :, 0].astype(np.int64)
+    results = {}
+
+    for feature_id in target_ids:
+        feature_id = int(feature_id)
+        signal_mask = valid & (feature_ids == feature_id)
+        n_observations = int(signal_mask.sum())
+        result = {
+            "unit": TARGET_UNITS.get(variable_names[feature_id]),
+            "n_observations": n_observations,
+        }
+
+        if n_observations:
+            draws = gen[signal_mask]
+            actual_standardized = target[:, :, 2][signal_mask]
+            predictions = {
+                "median": np.median(draws, axis=-1),
+                "mean": np.mean(draws, axis=-1),
+            }
+            scale = stds[feature_id] if stds[feature_id] != 0 else 1.0
+            actual = actual_standardized * scale + means[feature_id]
+            result["MSE_standardized"] = {
+                name: float(np.mean((prediction - actual_standardized) ** 2))
+                for name, prediction in predictions.items()
+            }
+            result["MSE_original_units"] = {
+                name: float(np.mean(((prediction * scale + means[feature_id]) - actual) ** 2))
+                for name, prediction in predictions.items()
+            }
+        else:
+            result["MSE_standardized"] = {"median": None, "mean": None}
+            result["MSE_original_units"] = {"median": None, "mean": None}
+
+        results[variable_names[feature_id]] = result
+
+    return results
+
+
 def save_predictions_csv(rows, path):
     columns = ["sample_id", "signal", "minute", "actual", "predicted_median", "predicted_mean", "predicted_p025", "predicted_p975"]
     with path.open("w", newline="", encoding="utf-8") as file:
@@ -246,6 +289,9 @@ def main():
         "test_samples": int(generation.shape[0]),
         "SACRPS": float(sacrps),
         "MSE": float(mse.item() if torch.is_tensor(mse) else mse),
+        "MSE_by_signal": mse_by_signal(
+            generation, samples_y, variable_names, target_ids, means, stds
+        ),
     }
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2, ensure_ascii=False)

@@ -45,7 +45,7 @@ def train(
                 )
                 
             lr_scheduler.step()
-        if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0 and epoch_no > 135:
+        if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
             CRPS_valid, _ = evaluate(0, model, valid_loader, nsample=5, foldername=foldername)
             print('{} (best)'.format(round(best_valid_loss, 4)))
@@ -60,9 +60,11 @@ def train(
                 print('count: {}'.format(ct))
             # earlystopping
             if ct > 2:
-                model.load_state_dict(torch.load(output_path))
                 print('stop')
                 break
+
+    if valid_loader is not None and best_valid_loss < np.inf:
+        model.load_state_dict(torch.load(output_path))
 
 def calc_metrics(is_test, all_generation, all_samples_y):
     MSE = None
@@ -72,7 +74,7 @@ def calc_metrics(is_test, all_generation, all_samples_y):
         # calculate MSE
         gt = all_samples_y[:, 2]
         mask = all_samples_y[:, 3]
-        prediction = all_generation.median(dim=2)
+        prediction = all_generation.mean(dim=2)
         MSE = ((prediction.values - gt) * mask) ** 2
         MSE = MSE.sum() / mask.sum()
     else:
