@@ -26,6 +26,16 @@ def split_subjects(subjects, seed=2026):
     )
 
 
+def split_validation_subjects(subjects, seed=2026):
+    """Split the legacy validation patients evenly into model-selection and calibration sets."""
+    if seed < 0:
+        raise ValueError("seed must be a non-negative integer")
+    subjects = np.unique(np.asarray(subjects))
+    ordered = np.random.default_rng(seed + 1).permutation(subjects)
+    midpoint = (len(ordered) + 1) // 2
+    return ordered[:midpoint], ordered[midpoint:]
+
+
 def seed_everything(seed=2026, deterministic=True):
     """Seed Python, NumPy and PyTorch, and request deterministic kernels.
 

@@ -19,9 +19,24 @@ Download the MIMIC-III data to "/preprocess/data/MIMICIII"
 Run the files step_1.py through step_4.py in order in the folder "/preprocess"
 
 # Experiments
-Run the file main.py
 
-To test a pretrained model, please assign the model folder name to the parameter "modelfolder"
+`main.py` trains and evaluates on `val_model` by default; use `--split calibration` for
+calibration reports. The original 16% validation partition is split by patient into
+model-selection and calibration populations (approximately 8% each), while the 20% test
+partition remains untouched unless explicitly requested. The normalizer is fit on training
+patients only; validation and calibration patients do not determine its statistics.
+
+```bash
+python main.py --seed 2026 --split val_model
+python main.py --modelfolder <run> --split test
+```
+
+Standalone inference defaults to `val_model`; specify `--split calibration` or
+`--split test` to select another population:
+
+```bash
+python infer.py --checkpoint save/<run>/model.pth --split test
+```
 
 # Reproducibility
 
@@ -56,18 +71,29 @@ results across different hardware/CUDA versions are not guaranteed.
 
 # Evaluation metrics
 
-Validation and test reports include mean-based MSE, median-based MAE, ensemble CRPS,
-and 80%/95% interval coverage, width, and interval score. Per-signal metrics are in
-original clinical units; cross-signal micro, macro-by-variable, and patient means use
-frozen per-signal scales from training patients. Numerators and denominators are saved
-alongside each aggregate. The reference is stored in
-`preprocess/data/evaluation_reference_scale.pkl`: retain it unchanged when changing the
-normalizer to keep comparisons on the same scale. `infer.py` requires this artifact.
+Evaluation writes `metrics_*.json`, `baseline_metrics.json`, batch-aligned forecast shards
+(`generation`, targets, history, and patient/sample metadata), and prediction/calibration
+plots. It does not concatenate the full test set on GPU. Reports identify the split,
+population and model/baseline source; preprocessing currently aggregates event sources,
+so event-level clinical provenance is unavailable.
 
-`NACRPS` retains the legacy quantile-grid formula and its normalization by the sum of
-absolute standardized targets; validation and test retain their historical quantile
-sets. It is reported for continuity, not as a score directly comparable across tasks
-or cohorts.
+Metrics include mean-based MSE, median-based MAE, empirical and fair ensemble CRPS,
+80%/95% coverage, width and interval score, plus upper/lower threshold-weighted CRPS.
+Tail thresholds are explicit in `config/base.yaml` and scores include all valid queries.
+Per-signal values use original clinical units; cross-signal micro, macro-by-variable,
+and patient means use frozen per-signal scales. Numerators, denominators, counts and
+undefined-score reasons are included. The frozen reference is
+`preprocess/data/evaluation_reference_scale.pkl`; retain it when changing the normalizer.
+
+`baseline_metrics.json` includes training-mean, persistence, causal regularized trend,
+moving-average, training-prevalence risk and a small causal logistic risk classifier.
+Missing history falls back to training means and reports fallback counts and time since
+last measurement.
+
+`NACRPS` retains its legacy quantile-grid formula and normalization by the sum of
+absolute standardized targets. It is reported for continuity, not as a score comparable
+across tasks or cohorts. Empty masks and zero denominators produce null scores with a
+count/reason (or a protocol error for an empty evaluation split), never a fabricated zero.
 
 # Acknowledgements
 A part of the codes is based on [CSDI](https://github.com/ermongroup/CSDI) and [STraTS](https://github.com/sindhura97/STraTS)

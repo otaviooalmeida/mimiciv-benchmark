@@ -96,24 +96,40 @@ class MIMIC_Dataset(Dataset):
     def __len__(self):
         return len(self.use_index_list)
         
-def get_dataloader(data_path, var_path, size, batch_size=32, seed=2026):
-    train_set, train_info, valid_set, valid_info, test_set, test_info = pickle.load(open(data_path, 'rb'))
+def get_dataloader(data_path, var_path, size, batch_size=32, seed=2026, include_test=True):
+    prepared = pickle.load(open(data_path, 'rb'))
+    if len(prepared) == 8:
+        (train_set, train_info, val_set, val_info,
+         calibration_set, calibration_info, test_set, test_info) = prepared
+    elif len(prepared) == 6:
+        # Legacy datasets remain usable for model validation and explicit test runs.
+        train_set, train_info, val_set, val_info, test_set, test_info = prepared
+        calibration_set = calibration_info = None
+    else:
+        raise ValueError("dataset.pkl must contain either legacy 3-split or current 4-split data")
     var, target_var = pickle.load(open(var_path, 'rb'))
     train_data = MIMIC_Dataset(train_set, train_info, size, target_var, seed=seed)
-    valid_data = MIMIC_Dataset(valid_set, valid_info, size, target_var, seed=seed + 1)
-    test_data = MIMIC_Dataset(test_set, test_info, size, target_var, seed=seed + 2)
+    val_data = MIMIC_Dataset(val_set, val_info, size, target_var, seed=seed + 1)
+    calibration_data = None if calibration_set is None else MIMIC_Dataset(
+        calibration_set, calibration_info, size, target_var, seed=seed + 2
+    )
+    test_seed = seed + 3 if calibration_data is not None else seed + 2
+    test_data = MIMIC_Dataset(test_set, test_info, size, target_var, seed=test_seed) if include_test else None
 
-    train_generator = torch.Generator().manual_seed(seed)
-    valid_generator = torch.Generator().manual_seed(seed + 1)
-    test_generator = torch.Generator().manual_seed(seed + 2)
     train_loader = DataLoader(
-        train_data, batch_size=batch_size, shuffle=True, generator=train_generator
+        train_data, batch_size=batch_size, shuffle=True,
+        generator=torch.Generator().manual_seed(seed),
     )
-    valid_loader = DataLoader(
-        valid_data, batch_size=batch_size, shuffle=False, generator=valid_generator
+    val_model_loader = DataLoader(
+        val_data, batch_size=batch_size, shuffle=False,
+        generator=torch.Generator().manual_seed(seed + 1),
     )
-    test_loader = DataLoader(
-        test_data, batch_size=batch_size, shuffle=False, generator=test_generator
+    calibration_loader = None if calibration_data is None else DataLoader(
+        calibration_data, batch_size=batch_size, shuffle=False,
+        generator=torch.Generator().manual_seed(seed + 2),
     )
-    
-    return train_loader, valid_loader, test_loader
+    test_loader = None if test_data is None else DataLoader(
+        test_data, batch_size=batch_size, shuffle=False,
+        generator=torch.Generator().manual_seed(test_seed),
+    )
+    return train_loader, val_model_loader, calibration_loader, test_loader

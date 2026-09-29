@@ -6,6 +6,20 @@ import numpy as np
 
 
 TargetBatch = namedtuple("TargetBatch", "values feature_ids mask")
+METRIC_KINDS = {
+    "MSE_mean": "squared",
+    "MAE_median": "linear",
+    "CRPS_empirical": "linear",
+    "CRPS_fair": "linear",
+    "twCRPS_upper": "linear",
+    "twCRPS_lower": "linear",
+    "coverage_80": "coverage",
+    "width_80": "linear",
+    "interval_score_80": "linear",
+    "coverage_95": "coverage",
+    "width_95": "linear",
+    "interval_score_95": "linear",
+}
 TARGET_UNITS = {
     "HR": "bpm",
     "SBP": "mmHg",
@@ -83,14 +97,67 @@ def validate_forecasts(generation, targets):
     return generation
 
 
-def _stat(numerator, denominator):
-    numerator = float(numerator)
+def crps_ensemble(draws, observation, variant="empirical"):
+    """Compute empirical or fair CRPS over the final (ensemble) axis in O(S log S)."""
+    draws = np.asarray(draws, dtype=float)
+    if draws.ndim < 1 or draws.shape[-1] < 1:
+        raise ValueError("draws must contain at least one ensemble member")
+    if variant not in {"empirical", "fair"}:
+        raise ValueError("variant must be 'empirical' or 'fair'")
+    n_draws = draws.shape[-1]
+    if variant == "fair" and n_draws < 2:
+        raise ValueError("fair CRPS requires at least two ensemble members")
+    observation = np.asarray(observation, dtype=float)
+    if not np.isfinite(draws).all() or not np.isfinite(observation).all():
+        raise ValueError("draws and observations must be finite")
+    observation = np.broadcast_to(observation, draws.shape[:-1])
+    ordered = np.sort(draws, axis=-1)
+    ranks = 2 * np.arange(1, n_draws + 1) - n_draws - 1
+    pair_sum = np.sum(ordered * ranks, axis=-1)
+    denominator = n_draws ** 2 if variant == "empirical" else n_draws * (n_draws - 1)
+    return np.mean(np.abs(draws - observation[..., None]), axis=-1) - pair_sum / denominator
+
+
+def ensemble_pit_ranks(draws, observation):
+    """Return deterministic mid-rank PIT values and discrete ensemble ranks."""
+    draws = np.asarray(draws, dtype=float)
+    observation = np.asarray(observation, dtype=float)
+    if draws.ndim < 1 or draws.shape[-1] < 1:
+        raise ValueError("draws must contain at least one ensemble member")
+    observation = np.broadcast_to(observation, draws.shape[:-1])
+    if not np.isfinite(draws).all() or not np.isfinite(observation).all():
+        raise ValueError("draws and observations must be finite")
+    less = np.sum(draws < observation[..., None], axis=-1)
+    equal = np.sum(draws == observation[..., None], axis=-1)
+    pit = (less + 0.5 * equal) / draws.shape[-1]
+    ranks = np.floor(pit * (draws.shape[-1] + 1)).astype(int)
+    return pit, np.clip(ranks, 0, draws.shape[-1])
+
+
+def twcrps_upper(draws, observation, threshold, variant="empirical"):
+    """Upper-tail CRPS: CRPS(max(X,u), max(y,u)); score all supplied cases."""
+    return crps_ensemble(np.maximum(draws, threshold), np.maximum(observation, threshold), variant)
+
+
+def twcrps_lower(draws, observation, threshold, variant="empirical"):
+    """Lower-tail CRPS: CRPS(min(X,l), min(y,l)); score all supplied cases."""
+    return crps_ensemble(np.minimum(draws, threshold), np.minimum(observation, threshold), variant)
+
+
+def _stat(numerator, denominator, reason=None, count=None):
+    numerator = None if numerator is None else float(numerator)
     denominator = float(denominator)
-    return {
+    if count is None and denominator.is_integer():
+        count = int(denominator)
+    result = {
         "numerator": numerator,
         "denominator": denominator,
-        "value": numerator / denominator if denominator else None,
+        "count": count,
+        "value": numerator / denominator if denominator and numerator is not None else None,
     }
+    if result["value"] is None:
+        result["reason"] = reason or "zero_denominator"
+    return result
 
 
 def legacy_nacrps_statistics(is_test, generation, samples_y):
@@ -103,15 +170,24 @@ def legacy_nacrps_statistics(is_test, generation, samples_y):
     actual = values[valid]
     draws = generation[valid]
     denominator = float(np.abs(actual).sum())
-    if not len(actual) or denominator == 0:
-        return {"numerator": 0.0, "denominator": denominator, "value": None}
+    if not len(actual):
+        return {
+            "numerator": None, "denominator": 0.0, "count": 0,
+            "value": None, "reason": "no_valid_observations",
+        }
     numerator = 0.0
     for quantile in quantiles:
         prediction = np.quantile(draws, quantile, axis=-1)
         pinball = np.abs((prediction - actual) * ((actual <= prediction).astype(float) - quantile))
         numerator += 2.0 * float(pinball.sum())
     numerator /= len(quantiles)
-    return {"numerator": numerator, "denominator": denominator, "value": numerator / denominator}
+    return {
+        "numerator": numerator,
+        "denominator": denominator,
+        "count": int(len(actual)),
+        "value": numerator / denominator if denominator else None,
+        **({} if denominator else {"reason": "zero_absolute_target_sum"}),
+    }
 
 
 def calculate_predictive_metrics(
@@ -123,6 +199,10 @@ def calculate_predictive_metrics(
     stds,
     reference_scales=None,
     info=None,
+    tail_thresholds=None,
+    forecast_origin_minute=30.0,
+    include_horizons=True,
+    include_patient_statistics=False,
 ):
     """Return original-unit per-signal metrics and reference-scaled aggregates.
 
@@ -135,8 +215,13 @@ def calculate_predictive_metrics(
     values = _numpy(targets.values)
     feature_ids = _numpy(targets.feature_ids)
     valid = _numpy(targets.mask).astype(bool)
+    raw_samples_y = _numpy(samples_y)
+    query_minutes = raw_samples_y[:, 1, :]
+    if not np.isfinite(query_minutes[valid]).all():
+        raise ValueError("Non-finite query time at a valid target position")
 
     names = list(variable_names)
+    tail_thresholds = tail_thresholds or {}
     target_ids = [int(index) for index in target_ids]
     if len(set(target_ids)) != len(target_ids):
         raise ValueError("target_ids must not contain duplicates")
@@ -169,8 +254,28 @@ def calculate_predictive_metrics(
         count = int(signal_mask.sum())
         name = names[feature_id]
         unit = TARGET_UNITS.get(name)
-        result = {"unit": unit, "n_observations": count, "metrics": {}}
+        signal_thresholds = tail_thresholds.get(name, {})
+        result = {
+            "unit": unit,
+            "n_observations": count,
+            "tail_thresholds": signal_thresholds,
+            "metrics": {},
+            "diagnostics": {
+                "pit": {"count": 0, "histogram": [0] * 10, "rank_histogram": []},
+                "event_reliability": {},
+                "quantiles_by_query_minute": {},
+            },
+        }
         if count == 0:
+            for metric_name, kind in METRIC_KINDS.items():
+                original_unit = f"{unit}²" if kind == "squared" and unit else "proportion" if kind == "coverage" else unit
+                metric = {
+                    "original_unit": original_unit,
+                    "original_units": _stat(None, 0, reason="no_valid_observations"),
+                }
+                if scales is not None:
+                    metric["reference_scaled"] = _stat(None, 0, reason="no_valid_observations")
+                result["metrics"][metric_name] = metric
             per_signal[name] = result
             continue
 
@@ -188,16 +293,75 @@ def calculate_predictive_metrics(
         draws = standardized_draws * normalizer_scale + mean
         point_mean = draws.mean(axis=-1)
         point_median = np.median(draws, axis=-1)
-        sorted_draws = np.sort(draws, axis=-1)
         n_draws = draws.shape[-1]
-        ranks = (2 * np.arange(1, n_draws + 1) - n_draws - 1).astype(float)
-        crps = np.mean(np.abs(draws - actual[:, None]), axis=-1) - (sorted_draws @ ranks) / (n_draws ** 2)
-
+        pit, ranks = ensemble_pit_ranks(draws, actual)
+        pit_histogram = np.histogram(pit, bins=np.linspace(0, 1, 11))[0]
+        rank_histogram = np.bincount(ranks, minlength=n_draws + 1)
+        query_values = query_minutes[signal_mask]
+        quantile_levels = (0.05, 0.25, 0.50, 0.75, 0.95)
+        query_quantiles = {}
+        for query_minute in np.unique(query_values):
+            selected = query_values == query_minute
+            quantiles = np.quantile(draws[selected], quantile_levels, axis=-1)
+            query_quantiles[str(float(query_minute))] = {
+                "count": int(selected.sum()),
+                "observed_sum": float(actual[selected].sum()),
+                "predicted_quantile_sums": {
+                    str(level): float(quantiles[index].sum())
+                    for index, level in enumerate(quantile_levels)
+                },
+            }
+        event_reliability = {}
+        for tail, threshold_name in (("upper", "upper"), ("lower", "lower")):
+            if threshold_name not in signal_thresholds:
+                continue
+            threshold = float(signal_thresholds[threshold_name])
+            probabilities = (draws >= threshold).mean(axis=-1) if tail == "upper" else (draws <= threshold).mean(axis=-1)
+            observed_events = (actual >= threshold) if tail == "upper" else (actual <= threshold)
+            bin_indices = np.minimum((probabilities * 10).astype(int), 9)
+            bins = []
+            for bin_index in range(10):
+                selected = bin_indices == bin_index
+                bins.append({
+                    "count": int(selected.sum()),
+                    "predicted_probability_sum": float(probabilities[selected].sum()),
+                    "observed_event_sum": int(observed_events[selected].sum()),
+                })
+            event_reliability[tail] = {"threshold": threshold, "bins": bins}
+        result["diagnostics"] = {
+            "pit": {
+                "count": count,
+                "histogram": pit_histogram.tolist(),
+                "rank_histogram": rank_histogram.tolist(),
+            },
+            "event_reliability": event_reliability,
+            "quantiles_by_query_minute": query_quantiles,
+        }
         per_observation = {
             "MSE_mean": (np.square(point_mean - actual), "squared"),
             "MAE_median": (np.abs(point_median - actual), "linear"),
-            "CRPS_ensemble": (crps, "linear"),
+            "CRPS_empirical": (crps_ensemble(draws, actual, "empirical"), "linear"),
         }
+        undefined_metrics = {
+            "twCRPS_upper": "threshold_not_configured",
+            "twCRPS_lower": "threshold_not_configured",
+        }
+        if n_draws > 1:
+            per_observation["CRPS_fair"] = (crps_ensemble(draws, actual, "fair"), "linear")
+        else:
+            undefined_metrics["CRPS_fair"] = "requires_at_least_two_draws"
+        if "upper" in signal_thresholds:
+            threshold = float(signal_thresholds["upper"])
+            if not np.isfinite(threshold):
+                raise ValueError(f"Upper-tail threshold for {name} must be finite")
+            per_observation["twCRPS_upper"] = (twcrps_upper(draws, actual, threshold), "linear")
+            undefined_metrics.pop("twCRPS_upper")
+        if "lower" in signal_thresholds:
+            threshold = float(signal_thresholds["lower"])
+            if not np.isfinite(threshold):
+                raise ValueError(f"Lower-tail threshold for {name} must be finite")
+            per_observation["twCRPS_lower"] = (twcrps_lower(draws, actual, threshold), "linear")
+            undefined_metrics.pop("twCRPS_lower")
         for level in levels:
             tail = (1.0 - level) / 2.0
             lower, upper = np.quantile(draws, [tail, 1.0 - tail], axis=-1)
@@ -235,6 +399,17 @@ def calculate_predictive_metrics(
                 signal_scaled[metric_name] = normalized
             result["metrics"][metric_name] = metric_result
 
+        for metric_name, reason in undefined_metrics.items():
+            kind = METRIC_KINDS[metric_name]
+            original_unit = f"{unit}²" if kind == "squared" and unit else "proportion" if kind == "coverage" else unit
+            metric_result = {
+                "original_unit": original_unit,
+                "original_units": _stat(None, 0, reason=reason),
+            }
+            if reference_scale is not None:
+                metric_result["reference_scaled"] = _stat(None, 0, reason=reason)
+            result["metrics"][metric_name] = metric_result
+
         # Preserve per-feature observation numerators for transparent aggregation.
         for metric_name, (observations, _) in per_observation.items():
             result["metrics"][metric_name]["original_units"]["denominator"] = count
@@ -259,11 +434,7 @@ def calculate_predictive_metrics(
         n_total += count
 
     aggregates = {}
-    for metric_name in (
-        "MSE_mean", "MAE_median", "CRPS_ensemble",
-        "coverage_80", "width_80", "interval_score_80",
-        "coverage_95", "width_95", "interval_score_95",
-    ):
+    for metric_name in METRIC_KINDS:
         observations = pooled.get(metric_name, [])
         micro_numerator = sum(float(array.sum()) for array in observations)
         micro_denominator = sum(len(array) for array in observations)
@@ -275,8 +446,14 @@ def calculate_predictive_metrics(
             "mean_per_patient": _stat(sum(patient_means), len(patient_means)),
         }
 
-    return {
+    report = {
         "metric_units": "original clinical units by signal; cross-signal aggregates use frozen reference scales",
+        "metric_formulas": {
+            "CRPS_empirical": "mean|x-y| - sum_{s!=r}|x_s-x_r|/(2*S^2)",
+            "CRPS_fair": "mean|x-y| - sum_{s!=r}|x_s-x_r|/(2*S*(S-1)); requires S>1",
+            "twCRPS_upper": "empirical CRPS(max(X,u), max(y,u)) over every valid query",
+            "twCRPS_lower": "empirical CRPS(min(X,l), min(y,l)) over every valid query",
+        },
         "aggregation_definitions": {
             "micro_per_observation": "ratio of summed reference-scaled observation scores to valid observation count",
             "macro_per_variable": "unweighted mean of per-variable mean scores",
@@ -288,6 +465,31 @@ def calculate_predictive_metrics(
         "by_signal": per_signal,
         "aggregates": aggregates,
     }
+    if include_patient_statistics:
+        report["patient_statistics"] = {
+            metric_name: {
+                str(patient_id): {"numerator": totals[0], "denominator": totals[1]}
+                for patient_id, totals in values_by_patient.items()
+            }
+            for metric_name, values_by_patient in patient_totals.items()
+        }
+    if include_horizons:
+        report["by_horizon_minutes"] = {}
+        for query_minute in np.unique(query_minutes[valid]):
+            selected = valid & (query_minutes == query_minute)
+            horizon_targets = raw_samples_y.copy()
+            horizon_targets[:, 3, :] = selected.astype(float)
+            horizon_report = calculate_predictive_metrics(
+                generation, horizon_targets, names, target_ids, means, stds,
+                reference_scales=reference_scales, info=None,
+                tail_thresholds=tail_thresholds,
+                forecast_origin_minute=forecast_origin_minute,
+                include_horizons=False,
+                include_patient_statistics=False,
+            )
+            horizon_key = str(float(query_minute - forecast_origin_minute))
+            report["by_horizon_minutes"][horizon_key] = horizon_report["by_signal"]
+    return report
 
 
 def legacy_nacrps_and_mse(is_test, generation, samples_y):
@@ -298,10 +500,8 @@ def legacy_nacrps_and_mse(is_test, generation, samples_y):
     valid = _numpy(targets.mask).astype(bool)
     nacrps_stats = legacy_nacrps_statistics(is_test, generation_array, samples_y)
     nacrps = nacrps_stats["value"]
-    if nacrps is None:
-        nacrps = float("nan")
     if valid.any():
         mse = float(np.square(generation_array.mean(axis=-1)[valid] - values[valid]).mean())
     else:
-        mse = float("nan")
+        mse = None
     return nacrps, mse

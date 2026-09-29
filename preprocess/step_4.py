@@ -8,7 +8,7 @@ import numpy as np
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from reproducibility import split_subjects
+from reproducibility import split_subjects, split_validation_subjects
 
 parser = argparse.ArgumentParser(description='Create reproducible patient-level dataset splits.')
 parser.add_argument('--seed', type=int, default=None, help='Seed used for the patient-level split.')
@@ -33,14 +33,12 @@ info = pd.DataFrame(info, columns = ['ts_ind', 'sub_id', 'x_len', 'y_len'])
 
 # Patient-wise split. Keep split membership in a sidecar for audit/reuse.
 train_sub, valid_sub, test_sub = split_subjects(info['sub_id'].to_numpy(), seed=args.seed)
+val_model_sub, calibration_sub = split_validation_subjects(valid_sub, seed=args.seed)
 
-# Normalize with the existing pipeline statistics. Separately freeze a training-only
-# reference scale in original units so reported metrics survive normalizer changes.
+# Fit normalization and the independent evaluation reference on training patients only.
 rec = [[] for _ in range(len(var))]
-reference_rec = [[] for _ in range(len(var))]
-train_subjects = set(train_sub.tolist())
 
-for sub_id in np.concatenate((train_sub, valid_sub)):
+for sub_id in train_sub:
     index = np.array(info.loc[info.sub_id == sub_id].index)
     for i in index:
         stay = samples[i]
@@ -48,8 +46,6 @@ for sub_id in np.concatenate((train_sub, valid_sub)):
             feature_id = stay[0][j]
             value = stay[2][j]
             rec[feature_id].append(value)
-            if sub_id in train_subjects:
-                reference_rec[feature_id].append(value)
 
 mean = np.full(len(var), np.nan)
 std = np.full(len(var), np.nan)
@@ -70,7 +66,7 @@ if reference_scale_path.is_file():
 else:
     reference_scales = np.ones(len(var), dtype=float)
     for feature_id in target_var:
-        observations = np.asarray(reference_rec[int(feature_id)], dtype=float)
+        observations = np.asarray(rec[int(feature_id)], dtype=float)
         if not len(observations) or not np.isfinite(observations).all():
             raise ValueError('Cannot create a finite frozen evaluation scale for target {}'.format(var[int(feature_id)]))
         scale = float(observations.std())
@@ -88,9 +84,9 @@ else:
     with reference_scale_path.open('wb') as reference_file:
         pickle.dump(reference, reference_file)
 
-sub_sets = [train_sub, valid_sub, test_sub]
-data_sets = [[], [], []]
-info_sets = [[], [], []]
+sub_sets = [train_sub, val_model_sub, calibration_sub, test_sub]
+data_sets = [[], [], [], []]
+info_sets = [[], [], [], []]
 for si in range(len(sub_sets)):
     for sub_id in sub_sets[si]:
         index = np.array(info.loc[info.sub_id == sub_id].index)
@@ -106,11 +102,19 @@ for si in range(len(sub_sets)):
             info_sets[si].append(info.iloc[i])
 
 pickle.dump([mean, std], open('data/mean_std.pkl','wb'))
-pickle.dump([data_sets[0], pd.DataFrame(info_sets[0]), data_sets[1], pd.DataFrame(info_sets[1]), data_sets[2], pd.DataFrame(info_sets[2])], open('data/dataset.pkl','wb'))
+pickle.dump([
+    data_sets[0], pd.DataFrame(info_sets[0]),
+    data_sets[1], pd.DataFrame(info_sets[1]),
+    data_sets[2], pd.DataFrame(info_sets[2]),
+    data_sets[3], pd.DataFrame(info_sets[3]),
+], open('data/dataset.pkl','wb'))
 with open('data/splits.pkl', 'wb') as split_file:
     pickle.dump({
         'seed': args.seed,
         'train_subjects': train_sub,
-        'valid_subjects': valid_sub,
+        'valid_subjects': val_model_sub,
+        'model_validation_subjects': val_model_sub,
+        'calibration_subjects': calibration_sub,
+        'legacy_valid_subjects': valid_sub,
         'test_subjects': test_sub,
     }, split_file)
