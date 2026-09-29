@@ -1,10 +1,10 @@
 # TDSTF
 This is the github repository for the paper "A Transformer-based Diffusion Probabilistic Model for Heart Rate and Blood Pressure Forecasting in Intensive Care Unit" (https://doi.org/10.1016/j.cmpb.2024.108060)
 
-# MIMIC-III data
-Download the dataset at
+# MIMIC-IV data
+Download the MIMIC-IV release used for the experiment (currently expected: v3.1) from
 
-https://physionet.org/content/mimiciii/1.4/
+https://physionet.org/content/mimiciv/3.1/
 
 # Environment
 [Anaconda3-2023.03-0-Windows-x86_64](https://repo.anaconda.com/archive/)
@@ -12,11 +12,35 @@ https://physionet.org/content/mimiciii/1.4/
 [Pytorch=2.1.1 + cuda=11.8](https://pytorch.org/)
 
 # Data preprocessing
-Create empty folders: "/save", "/preprocess/data", "/preprocess/data/MIMICIII", and "/preprocess/data/first"
+Create empty folders `/save`, `/preprocess/data`, and `/preprocess/data/first`.
+Place the MIMIC-IV release under `/preprocess/MIMICIV` with its `icu/` and `hosp/` files.
+From `/preprocess`, run steps 1–4 in order (set the release label on step 1):
 
-Download the MIMIC-III data to "/preprocess/data/MIMICIII"
+```bash
+MIMIC_DATA_VERSION=3.1 python step_1.py
+python step_2.py
+python step_3.py
+python step_4.py --seed 2026
+```
 
-Run the files step_1.py through step_4.py in order in the folder "/preprocess"
+# Auditable events and causal availability
+
+Preprocessing step 1 writes `preprocess/data/clinical_events.csv` and
+`clinical_event_audit.json`, preserving IDs, source dictionaries, raw values/units,
+measurement and availability times, and inputevent rate/amount/order/status metadata.
+The item IDs follow the existing feature mappings; MIT-LCP SQL is pinned to commit
+`303d26c623dcc9c49cc0f204468d4acc2f063797` as guidance, not universal clinical truth.
+Set `MIMIC_DATA_VERSION` before step 1 to record the exact release label. Details and
+limitations: [`docs/data/clinical-events.md`](docs/data/clinical-events.md).
+
+The target is now peripheral `SpO2_peripheral`; lab `SO2_bloodgas` remains separate.
+Step 2 excludes missing `storetime` by default and supports an explicit sensitivity run:
+`python step_2.py --missing-availability-policy measurement_time`. Step 3 also enforces
+measurement time before cutoff and availability at/before cutoff. Retrospectively expanded
+inputevent medication features are excluded until an as-of infusion state can be reconstructed.
+Regenerate preprocessing steps 1–4 after this target/protocol change. If the old frozen
+scale exists, archive `preprocess/data/evaluation_reference_scale.pkl` explicitly before
+step 4; step 4 refuses to silently reuse or overwrite a scale for the former mixed target.
 
 # Experiments
 
@@ -74,8 +98,9 @@ results across different hardware/CUDA versions are not guaranteed.
 Evaluation writes `metrics_*.json`, `baseline_metrics.json`, batch-aligned forecast shards
 (`generation`, targets, history, and patient/sample metadata), and prediction/calibration
 plots. It does not concatenate the full test set on GPU. Reports identify the split,
-population and model/baseline source; preprocessing currently aggregates event sources,
-so event-level clinical provenance is unavailable.
+population and model/baseline source. `clinical_events.csv` preserves event provenance;
+the current forecast shards still use the legacy minute aggregation and do not carry a
+source ID for each model input/target.
 
 Metrics include mean-based MSE, median-based MAE, empirical and fair ensemble CRPS,
 80%/95% coverage, width and interval score, plus upper/lower threshold-weighted CRPS.

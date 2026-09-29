@@ -14,7 +14,7 @@ evaluation:
     SBP: {lower: 90, upper: 140}
     DBP: {lower: 60, upper: 90}
     Temperature: {lower: 36, upper: 38}
-    O2 Saturation: {lower: 90, upper: 100}
+    SpO2_peripheral: {lower: 90, upper: 100}
 
 diffusion:
   size: 60 

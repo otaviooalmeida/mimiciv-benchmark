@@ -1,12 +1,14 @@
 import pickle
 import numpy as np
 import concurrent.futures
+import json
 
 def sample(data, thread):
     _, target_var = pickle.load(open('data/var.pkl', 'rb'))
     icu_id = data.ts_ind.unique()
     samples = []
     info = []
+    cutoff_counts = {'context_candidates': 0, 'excluded_late_availability': 0, 'sampled_stays': 0}
     for i in icu_id:
         t = 0
         icu_data = data.loc[data.ts_ind==i]
@@ -19,7 +21,11 @@ def sample(data, thread):
                     pick = True
                     break
             if pick:
-                x = icu_data.loc[(icu_data.minute>=t)&(icu_data.minute<(t+30))]
+                history = icu_data.loc[(icu_data.minute>=t)&(icu_data.minute<(t+30))]
+                cutoff_counts['context_candidates'] += len(history)
+                late = history.available_minute > (t + 30)
+                cutoff_counts['excluded_late_availability'] += int(late.sum())
+                x = history.loc[~late]
                 x = x.groupby('ts_ind').agg({'vind':list, 'minute':list, 'value':list})
                 if len(x) > 0:
                     y = y.loc[y.vind.isin(target_var)].groupby('ts_ind').agg({'vind':list, 'minute':list, 'value':list})
@@ -41,14 +47,29 @@ def sample(data, thread):
                     ymask[: lx] = 0
                     samples.append([np.array(vind), np.array(minute), np.array(value), ymask])
                     info.append([x.index[0], icu_data.iloc[0].sub_id, lx, ly])
+                    cutoff_counts['sampled_stays'] += 1
                     break
             t += 10
     pickle.dump([samples, info], open('data/first/samples_{}.pkl'.format(thread+1),'wb'))
     print('Thread_{} finished'.format(thread))
+    return cutoff_counts
 
 sets = pickle.load(open('data/sets.pkl', 'rb'))
 threads = list(np.arange(len(sets)))
 
 if __name__ == '__main__':
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        executor.map(sample, sets, threads)
+        worker_counts = list(executor.map(sample, sets, threads))
+    with open('data/availability_audit.json', 'r', encoding='utf-8') as audit_file:
+        availability_audit = json.load(audit_file)
+    report = {
+        'measurement_context': '[window_start, cutoff)',
+        'availability_condition': 'available_minute <= cutoff',
+        'missing_availability_policy': availability_audit['missing_availability_policy'],
+        'fallback_rows_included_by_measurement_time': availability_audit['fallback_rows_included'],
+        'context_candidates': sum(count['context_candidates'] for count in worker_counts),
+        'excluded_late_availability': sum(count['excluded_late_availability'] for count in worker_counts),
+        'sampled_stays': sum(count['sampled_stays'] for count in worker_counts),
+    }
+    with open('data/availability_cutoff_audit.json', 'w', encoding='utf-8') as report_file:
+        json.dump(report, report_file, indent=2, ensure_ascii=False, allow_nan=False)

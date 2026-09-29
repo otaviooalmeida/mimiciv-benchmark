@@ -25,7 +25,8 @@ TARGET_UNITS = {
     "SBP": "mmHg",
     "DBP": "mmHg",
     "Temperature": "°C",
-    "O2 Saturation": "%",
+    "SpO2_peripheral": "%",
+    "SO2_bloodgas": "%",
 }
 
 

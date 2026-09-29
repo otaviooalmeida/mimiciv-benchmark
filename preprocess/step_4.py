@@ -59,7 +59,7 @@ if reference_scale_path.is_file():
     with reference_scale_path.open('rb') as reference_file:
         reference = pickle.load(reference_file)
     if reference.get('variable_names') != list(var) or not np.array_equal(reference.get('target_ids'), target_var):
-        raise ValueError('Frozen evaluation scales do not match the current variable layout; choose a new benchmark reference explicitly.')
+        raise ValueError('Frozen evaluation scales do not match the current target layout. Archive the old reference explicitly before creating a new benchmark scale; it will not be overwritten silently.')
     frozen_scales = np.asarray(reference.get('scales'), dtype=float)
     if frozen_scales.shape != (len(var),) or not np.isfinite(frozen_scales[target_var]).all() or np.any(frozen_scales[target_var] <= 0):
         raise ValueError('Frozen evaluation scales are missing or invalid for target variables.')

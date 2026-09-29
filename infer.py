@@ -26,7 +26,10 @@ from metrics_stream import PredictiveMetricsAccumulator
 from reproducibility import seed_everything, validate_split_seed
 
 
-TARGET_DISPLAY_NAMES = {"O2 Saturation": "SpO₂"}
+TARGET_DISPLAY_NAMES = {
+    "SpO2_peripheral": "SpO₂ periférica",
+    "SO2_bloodgas": "SO₂ (gasometria)",
+}
 
 
 def parse_args():

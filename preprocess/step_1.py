@@ -1,6 +1,17 @@
 import pandas as pd
 from tqdm import tqdm
 import numpy as np
+from pathlib import Path
+from clinical_event_table import (
+    append_event_rows,
+    build_chart_lab_events,
+    build_input_event_rows,
+    build_output_events,
+    load_dictionaries,
+    merge_summaries,
+    summarize_event_rows,
+    write_audit_report,
+)
 pd.set_option('mode.chained_assignment', None)
 
 mimic_data_dir = 'MIMICIV/'
@@ -8,6 +19,10 @@ mimic_data_dir = 'MIMICIV/'
 # Keep the existing internal column names for the rest of the pipeline.
 def legacy_column_name(column):
     return 'ICUSTAY_ID' if column == 'stay_id' else column.upper()
+
+def unit_token(series):
+    return (series.fillna('').astype(str).str.lower().str.replace('°', 'deg', regex=False)
+            .str.replace('.', '', regex=False).str.replace(' ', '', regex=False))
 
 # Get all ICU stays.
 icu = pd.read_csv(mimic_data_dir+'icu/icustays.csv', usecols=['subject_id', 'hadm_id', 'stay_id', 'intime', 'outtime'])
@@ -26,8 +41,11 @@ icu = icu.loc[icu.AGE>=18]
 # Extract chartevents for icu stays. MIMIC-IV has no ERROR column;
 # warning is not an equivalent error flag and is not used to exclude rows.
 ch = []
+source_row_offset = 0
 for chunk in tqdm(pd.read_csv(mimic_data_dir+'icu/chartevents.csv', chunksize=10000000, low_memory = False,
-                usecols = ['hadm_id', 'stay_id', 'itemid', 'charttime', 'value', 'valuenum', 'valueuom'])):
+                usecols = ['subject_id', 'hadm_id', 'stay_id', 'caregiver_id', 'itemid', 'charttime', 'storetime', 'value', 'valuenum', 'valueuom', 'warning'])):
+    chunk['source_row_id'] = np.arange(source_row_offset, source_row_offset + len(chunk))
+    source_row_offset += len(chunk)
     chunk.rename(columns=legacy_column_name, inplace=True)
     chunk = chunk.loc[chunk.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
     chunk = chunk.loc[chunk.CHARTTIME.notna()]
@@ -38,7 +56,7 @@ ch = ch.loc[~(ch.VALUE.isna() & ch.VALUENUM.isna())]
 ch['TABLE'] = 'chart'
 
 # Extract labevents for admissions.
-la = pd.read_csv(mimic_data_dir+'hosp/labevents.csv', usecols = ['hadm_id', 'itemid', 'charttime', 'value', 'valuenum', 'valueuom'])
+la = pd.read_csv(mimic_data_dir+'hosp/labevents.csv', usecols = ['labevent_id', 'subject_id', 'hadm_id', 'specimen_id', 'itemid', 'charttime', 'storetime', 'value', 'valuenum', 'valueuom', 'flag'])
 la.rename(columns=legacy_column_name, inplace=True)
 la = la.loc[la.HADM_ID.isin(icu.HADM_ID)]
 la.HADM_ID = la.HADM_ID.astype(int)
@@ -57,8 +75,6 @@ ch_bp = ch_bp.loc[(ch_bp.VALUENUM>=0)&(ch_bp.VALUENUM<=375)]
 ch_bp.loc[ch_bp.ITEMID.isin(dbp), 'NAME'] = 'DBP'
 ch_bp.loc[ch_bp.ITEMID.isin(sbp), 'NAME'] = 'SBP'
 ch_bp.loc[ch_bp.ITEMID.isin(mbp), 'NAME'] = 'MBP'
-ch_bp['VALUEUOM'] = 'mmHg'
-ch_bp['VALUE'] = None
 events = ch_bp.copy()
 del ch_bp
 
@@ -70,8 +86,6 @@ ch_gcs = ch.loc[ch.ITEMID.isin(gcs_eye+gcs_motor+gcs_verbal)]
 ch_gcs.loc[ch_gcs.ITEMID.isin(gcs_eye), 'NAME'] = 'GCS_eye'
 ch_gcs.loc[ch_gcs.ITEMID.isin(gcs_motor), 'NAME'] = 'GCS_motor'
 ch_gcs.loc[ch_gcs.ITEMID.isin(gcs_verbal), 'NAME'] = 'GCS_verbal'
-ch_gcs['VALUEUOM'] = None
-ch_gcs['VALUE'] = None
 events = pd.concat([events, ch_gcs])
 del ch_gcs
 
@@ -80,8 +94,6 @@ hr = [211, 220045]
 ch_hr = ch.loc[ch.ITEMID.isin(hr)]
 ch_hr = ch_hr.loc[(ch_hr.VALUENUM>=0)&(ch_hr.VALUENUM<=390)]
 ch_hr['NAME'] = 'HR'
-ch_hr['VALUEUOM'] = 'bpm'
-ch_hr['VALUE'] = None
 events = pd.concat([events, ch_hr])
 del ch_hr
 
@@ -90,68 +102,72 @@ rr = [618, 220210, 3603, 224689, 614, 651, 224422, 615, 224690, 619, 224688, 227
 ch_rr = ch.loc[ch.ITEMID.isin(rr)]
 ch_rr = ch_rr.loc[(ch_rr.VALUENUM>=0)&(ch_rr.VALUENUM<=330)]
 ch_rr['NAME'] = 'RR'
-ch_rr['VALUEUOM'] = 'brpm'
-ch_rr['VALUE'] = None
 events = pd.concat([events, ch_rr])
 del ch_rr
 
 # Extract temperature events. Convert F to C. Remove outliers.
 temp_c = [3655, 677, 676, 223762]
 temp_f = [223761, 678, 679, 3654]
-ch_temp_c = ch.loc[ch.ITEMID.isin(temp_c)]
-ch_temp_f = ch.loc[ch.ITEMID.isin(temp_f)]
-ch_temp_f.VALUENUM = (ch_temp_f.VALUENUM-32)*5/9
+ch_temp_c = ch.loc[ch.ITEMID.isin(temp_c)].copy()
+ch_temp_f = ch.loc[ch.ITEMID.isin(temp_f)].copy()
+ch_temp_c = ch_temp_c.loc[unit_token(ch_temp_c.VALUEUOM).isin(['c', 'degc', 'celsius'])]
+ch_temp_f = ch_temp_f.loc[unit_token(ch_temp_f.VALUEUOM).isin(['f', 'degf', 'fahrenheit'])]
+ch_temp_f.loc[:, 'VALUENUM'] = (ch_temp_f.VALUENUM-32)*5/9
 ch_temp = pd.concat([ch_temp_c, ch_temp_f])
 del ch_temp_c
 del ch_temp_f
 ch_temp = ch_temp.loc[(ch_temp.VALUENUM>=14.2)&(ch_temp.VALUENUM<=47)]
 ch_temp['NAME'] = 'Temperature'
-ch_temp['VALUEUOM'] = 'C'
-ch_temp['VALUE'] = None
+ch_temp['VALUEUOM'] = '°C'
 events = pd.concat([events, ch_temp])
 del ch_temp
 
 # Extract weight events. Convert lb to kg. Remove outliers.
 we_kg = [224639, 226512, 226846, 763]
 we_lb = [226531]
-ch_we_kg = ch.loc[ch.ITEMID.isin(we_kg)]
-ch_we_lb = ch.loc[ch.ITEMID.isin(we_lb)]
-ch_we_lb.VALUENUM = ch_we_lb.VALUENUM * 0.453592
+ch_we_kg = ch.loc[ch.ITEMID.isin(we_kg)].copy()
+ch_we_lb = ch.loc[ch.ITEMID.isin(we_lb)].copy()
+ch_we_kg = ch_we_kg.loc[unit_token(ch_we_kg.VALUEUOM).isin(['kg', 'kgs', 'kilogram', 'kilograms'])]
+ch_we_lb = ch_we_lb.loc[unit_token(ch_we_lb.VALUEUOM).isin(['lb', 'lbs', 'pound', 'pounds'])]
+ch_we_lb.loc[:, 'VALUENUM'] = ch_we_lb.VALUENUM * 0.45359237
 ch_we = pd.concat([ch_we_kg, ch_we_lb])
 del ch_we_kg
 del ch_we_lb
 ch_we = ch_we.loc[(ch_we.VALUENUM>=0)&(ch_we.VALUENUM<=300)]
 ch_we['NAME'] = 'Weight'
 ch_we['VALUEUOM'] = 'kg'
-ch_we['VALUE'] = None
 events = pd.concat([events, ch_we])
 del ch_we
 
 # Extract height events. Convert in to cm. 
 he_in = [1394, 226707]
 he_cm = [226730]
-ch_he_in = ch.loc[ch.ITEMID.isin(he_in)]
-ch_he_cm = ch.loc[ch.ITEMID.isin(he_cm)]
-ch_he_in.VALUENUM = ch_he_in.VALUENUM * 2.54
+ch_he_in = ch.loc[ch.ITEMID.isin(he_in)].copy()
+ch_he_cm = ch.loc[ch.ITEMID.isin(he_cm)].copy()
+ch_he_in = ch_he_in.loc[unit_token(ch_he_in.VALUEUOM).isin(['in', 'inch', 'inches'])]
+ch_he_cm = ch_he_cm.loc[unit_token(ch_he_cm.VALUEUOM).isin(['cm', 'centimeter', 'centimeters'])]
+ch_he_in.loc[:, 'VALUENUM'] = ch_he_in.VALUENUM * 2.54
 ch_he = pd.concat([ch_he_in, ch_he_cm])
 del ch_he_in
 del ch_he_cm
 ch_he = ch_he.loc[(ch_he.VALUENUM>=0)&(ch_he.VALUENUM<=275)]
 ch_he['NAME'] = 'Height'
 ch_he['VALUEUOM'] = 'cm'
-ch_he['VALUE'] = None
 events = pd.concat([events, ch_he])
 del ch_he
 
 # Extract fio2 events. Convert % to fraction. Remove outliers.
 fio2 = [3420, 223835, 3422, 189, 727, 190]
-ch_fio2 = ch.loc[ch.ITEMID.isin(fio2)]
-idx = ch_fio2.VALUENUM>1.0
-ch_fio2.loc[idx, 'VALUENUM'] = ch_fio2.loc[idx, 'VALUENUM'] / 100
+ch_fio2 = ch.loc[ch.ITEMID.isin(fio2)].copy()
+fio2_unit = unit_token(ch_fio2.VALUEUOM)
+fio2_percent = fio2_unit.isin(['%', 'percent', 'percentage'])
+fio2_fraction = fio2_unit.isin(['fraction', 'ratio', '0-1', '1'])
+ch_fio2 = ch_fio2.loc[fio2_percent | fio2_fraction].copy()
+fio2_percent = unit_token(ch_fio2.VALUEUOM).isin(['%', 'percent', 'percentage'])
+ch_fio2.loc[fio2_percent, 'VALUENUM'] = ch_fio2.loc[fio2_percent, 'VALUENUM'] / 100
 ch_fio2 = ch_fio2.loc[(ch_fio2.VALUENUM>=0.2)&(ch_fio2.VALUENUM<=1)]
 ch_fio2['NAME'] = 'FiO2'
-ch_fio2['VALUEUOM'] = None
-ch_fio2['VALUE'] = None
+ch_fio2['VALUEUOM'] = 'fraction'
 events = pd.concat([events, ch_fio2])
 del ch_fio2
 
@@ -163,7 +179,6 @@ idx = (ch_cr.VALUE=='Normal <3 Seconds')|(ch_cr.VALUE=='Normal <3 secs')
 ch_cr.loc[idx, 'VALUENUM'] = 0
 idx = (ch_cr.VALUE=='Abnormal >3 Seconds')|(ch_cr.VALUE=='Abnormal >3 secs')
 ch_cr.loc[idx, 'VALUENUM'] = 1
-ch_cr['VALUEUOM'] = None
 ch_cr['NAME'] = 'CRR'
 events = pd.concat([events, ch_cr])
 del ch_cr
@@ -185,8 +200,6 @@ ev_segl['NAME'] = 'Glucose (Serum)'
 
 ev_gl = pd.concat((ev_blgl, ev_wbgl, ev_segl))
 del ev_blgl, ev_wbgl, ev_segl
-ev_gl['VALUEUOM'] = 'mg/dL'
-ev_gl['VALUE'] = None
 events = pd.concat([events, ev_gl])
 del ev_gl
 
@@ -199,8 +212,6 @@ ev_br = ev_br.loc[(ev_br.VALUENUM>=0)&(ev_br.VALUENUM<=66)]
 ev_br.loc[ev_br.ITEMID.isin(br_to), 'NAME'] = 'Bilirubin (Total)'
 ev_br.loc[ev_br.ITEMID.isin(br_di), 'NAME'] = 'Bilirubin (Direct)'
 ev_br.loc[ev_br.ITEMID.isin(br_in), 'NAME'] = 'Bilirubin (Indirect)'
-ev_br['VALUEUOM'] = 'mg/dL'
-ev_br['VALUE'] = None
 events = pd.concat([events, ev_br])
 del ev_br
 
@@ -211,13 +222,14 @@ idx = (la_itb.VALUE=='INTUBATED')
 la_itb.loc[idx, 'VALUENUM'] = 1
 idx = (la_itb.VALUE=='NOT INTUBATED')
 la_itb.loc[idx, 'VALUENUM'] = 0
-la_itb['VALUEUOM'] = None
 la_itb['NAME'] = 'Intubated'
 events = pd.concat([events, la_itb])
 del la_itb
 
 # Extract multiple events. Remove outliers.
-o2sat = [834, 50817, 8498, 220227, 646, 220277]
+spo2_peripheral = [220277]
+o2_unclassified = [834, 8498, 220227, 646]
+so2_bloodgas = [50817]
 sod = [50983, 50824]
 pot = [50971, 50822]
 mg = [50960]
@@ -262,7 +274,7 @@ rdw = [51277]
 plt = [51265]
 rbc = [51279]
 
-features = {'O2 Saturation': [o2sat, [0,100], '%'],
+features = {'SpO2_peripheral': [spo2_peripheral, [0,100], '%'],
             'Sodium': [sod, [0,250], 'mEq/L'], 
             'Potassium': [pot, [0,15], 'mEq/L'], 
             'Magnesium': [mg, [0,22], 'mg/dL'], 
@@ -308,22 +320,42 @@ features = {'O2 Saturation': [o2sat, [0,100], '%'],
             'RBC': [rbc, [0,14], 'm/uL']
             }
 
+# Keep blood-gas saturation separate from peripheral pulse oximetry.
+ev_so2 = la.loc[la.ITEMID.isin(so2_bloodgas)].copy()
+ev_so2['NAME'] = 'SO2_bloodgas'
+ev_so2['TABLE'] = 'lab'
+events = pd.concat([events, ev_so2])
+del ev_so2
+
+# Older/ambiguous saturation item IDs remain identifiable but are not SpO2 labels.
+ev_o2_other = ch.loc[ch.ITEMID.isin(o2_unclassified)].copy()
+ev_o2_other['NAME'] = 'O2_saturation_chart_unclassified'
+events = pd.concat([events, ev_o2_other])
+del ev_o2_other
+
 for k, v in features.items():
-    print (k)
-    ev_k = pd.concat((ch.loc[ch.ITEMID.isin(v[0])], la.loc[la.ITEMID.isin(v[0])]))
+    ev_k = pd.concat((ch.loc[ch.ITEMID.isin(v[0])], la.loc[la.ITEMID.isin(v[0])])).copy()
     ev_k = ev_k.loc[(ev_k.VALUENUM>=v[1][0])&(ev_k.VALUENUM<=v[1][1])]
     ev_k['NAME'] = k
-    ev_k['VALUEUOM'] = v[2]
-    ev_k['VALUE'] = None
-    assert (ev_k.VALUENUM.isna().sum()==0)
     events = pd.concat([events, ev_k])
 del ev_k
+
+# Write an auditable raw-event sidecar before legacy mappings discard source detail.
+audit_path = Path('data/clinical_events.csv')
+audit_tmp_path = Path('data/clinical_events.csv.tmp')
+audit_tmp_path.unlink(missing_ok=True)
+d_items_audit, d_labitems_audit, dictionary_hashes = load_dictionaries(mimic_data_dir)
+chart_lab_audit = build_chart_lab_events(ch, la, events, icu, d_items_audit, d_labitems_audit)
+append_event_rows(audit_tmp_path, chart_lab_audit)
+audit_counts = {'chartevents_labevents': summarize_event_rows(chart_lab_audit)}
+del chart_lab_audit
 
 # Free some memory.
 del ch, la
 
 # Extract outputevents.
-oe = pd.read_csv(mimic_data_dir+'icu/outputevents.csv', usecols = ['stay_id', 'itemid', 'charttime', 'value', 'valueuom'])
+oe = pd.read_csv(mimic_data_dir+'icu/outputevents.csv', usecols = ['subject_id', 'hadm_id', 'stay_id', 'caregiver_id', 'itemid', 'charttime', 'storetime', 'value', 'valueuom', 'warning'])
+oe['SOURCE_ROW_ID'] = np.arange(len(oe))
 oe.rename(columns=legacy_column_name, inplace=True)
 oe = oe.loc[oe.VALUE.notna()]
 oe['VALUENUM'] = oe.VALUE
@@ -340,7 +372,7 @@ items.LABEL = items.LABEL.str.lower()
 oeitems = oe[['ITEMID']].drop_duplicates()
 oeitems = oeitems.merge(items, on='ITEMID', how='left')
 
-# Extract multiple events. Replace outliers with median.
+# Map selected output items; the audit table retains raw values and units.
 uf = [40286]
 keys = ['urine', 'foley', 'void', 'nephrostomy', 'condom', 'drainage bag']
 cond = pd.concat([oeitems.LABEL.str.contains(k) for k in keys], axis=1).any(axis='columns')
@@ -369,217 +401,108 @@ features = {'Ultrafiltrate': [uf, [0,7000],'mL'],
             }
 
 for k, v in features.items():
-    print (k)
-    ev_k = oe.loc[oe.ITEMID.isin(v[0])]
-    ind = (ev_k.VALUENUM>=v[1][0])&(ev_k.VALUENUM<=v[1][1])
-    med = ev_k.VALUENUM.loc[ind].median()
-    ev_k.loc[~ind, 'VALUENUM'] = med
+    ev_k = oe.loc[oe.ITEMID.isin(v[0])].copy()
     ev_k['NAME'] = k
-    ev_k['VALUEUOM'] = v[2]
     events = pd.concat([events, ev_k])
 del ev_k
 
+output_audit = build_output_events(oe, events, d_items_audit, d_labitems_audit)
+append_event_rows(audit_tmp_path, output_audit, append=True)
+audit_counts['outputevents'] = summarize_event_rows(output_audit)
+del output_audit
+
 # MIMIC-IV inputevents contains only MetaVision data.
 ie_mv = pd.read_csv(mimic_data_dir+'icu/inputevents.csv', low_memory = False,
-    usecols = ['stay_id', 'itemid', 'starttime', 'endtime',
-               'amount', 'amountuom'])
+    usecols = ['stay_id', 'itemid', 'starttime', 'amount', 'amountuom'])
 ie_mv.rename(columns=legacy_column_name, inplace=True)
 ie_mv = ie_mv.loc[ie_mv.ICUSTAY_ID.isin(icu.ICUSTAY_ID)]
 
-# Split MV intervals hourly.
-ie_mv.STARTTIME = pd.to_datetime(ie_mv.STARTTIME)
-ie_mv.ENDTIME = pd.to_datetime(ie_mv.ENDTIME)
-ie_mv['TD'] = ie_mv.ENDTIME - ie_mv.STARTTIME
-new_ie_mv = ie_mv.loc[ie_mv.TD<=pd.Timedelta(1,'h')].drop(columns=['STARTTIME', 'TD'])
-ie_mv = ie_mv.loc[ie_mv.TD>pd.Timedelta(1,'h')]
-new_rows = []
-for _,row in tqdm(ie_mv.iterrows()):
-    icuid, iid, amo, uom, stm, td = row.ICUSTAY_ID, row.ITEMID, row.AMOUNT, row.AMOUNTUOM, row.STARTTIME, row.TD
-    td = td.total_seconds()/60
-    num_hours = td // 60
-    hour_amount = 60*amo/td
-    for i in range(1,int(num_hours)+1):
-        new_rows.append([icuid, iid, stm+pd.Timedelta(i,'h'), hour_amount, uom])
-    rem_mins = td % 60
-    if rem_mins>0:
-        new_rows.append([icuid, iid, row['ENDTIME'], rem_mins*amo/td, uom])
-new_rows = pd.DataFrame(new_rows, columns=['ICUSTAY_ID', 'ITEMID', 'ENDTIME', 'AMOUNT', 'AMOUNTUOM'])
-new_ie_mv = pd.concat((new_ie_mv, new_rows))
-ie_mv = new_ie_mv.copy()
-del new_ie_mv
-ie_mv['TABLE'] = 'input_mv' 
-ie_mv.rename(columns={'ENDTIME':'CHARTTIME'}, inplace=True)
-
+# Keep one raw inputevents row per source record; do not spread amount across its duration.
+ie_mv['TABLE'] = 'input_mv'
+ie_mv.rename(columns={'STARTTIME':'CHARTTIME'}, inplace=True)
 ie = ie_mv
 del ie_mv
 ie.rename(columns={'AMOUNT':'VALUENUM', 'AMOUNTUOM':'VALUEUOM'}, inplace=True)
 events.CHARTTIME = pd.to_datetime(events.CHARTTIME)
 
-# Convert mcg->mg, L->ml.
-ind = (ie.VALUEUOM=='mcg')
-ie.loc[ind, 'VALUENUM'] = ie.loc[ind, 'VALUENUM']*0.001
-ie.loc[ind, 'VALUEUOM'] = 'mg'
-ind = (ie.VALUEUOM=='L')
-ie.loc[ind, 'VALUENUM'] = ie.loc[ind, 'VALUENUM']*1000
-ie.loc[ind, 'VALUEUOM'] = 'ml'
-
-# Extract Vasopressin events. Remove outliers.
+# Preserve item/name mapping only; raw inputevents are audited separately.
 vaso = [30051, 222315]
-ev_vaso = ie.loc[ie.ITEMID.isin(vaso)]
-ind1 = (ev_vaso.VALUENUM==0)
-ind2 = ev_vaso.VALUEUOM.isin(['U','units'])
-ind3 = (ev_vaso.VALUENUM>=0)&(ev_vaso.VALUENUM<=400)
-ind = ((ind2&ind3)|ind1)
-med = ev_vaso.VALUENUM.loc[ind].median()
-ev_vaso.loc[~ind, 'VALUENUM'] = med
-ev_vaso['VALUEUOM'] = 'units'
+ev_vaso = ie.loc[ie.ITEMID.isin(vaso)].copy()
 ev_vaso['NAME'] = 'Vasopressin'
 events = pd.concat([events, ev_vaso])
 del ev_vaso
 
-# Extract Vancomycin events. Convert dose,g to mg. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 vanc = [225798]
-ev_vanc = ie.loc[ie.ITEMID.isin(vanc)]
-ind = ev_vanc.VALUEUOM.isin(['mg'])
-ev_vanc.loc[ind, 'VALUENUM'] = ev_vanc.loc[ind, 'VALUENUM']*0.001 
-ev_vanc['VALUEUOM'] = 'g'
-ind = (ev_vanc.VALUENUM>=0)&(ev_vanc.VALUENUM<=8)
-med = ev_vanc.VALUENUM.loc[ind].median()
-ev_vanc.loc[~ind, 'VALUENUM'] = med
+ev_vanc = ie.loc[ie.ITEMID.isin(vanc)].copy()
 ev_vanc['NAME'] = 'Vancomycin'
 events = pd.concat([events, ev_vanc])
 del ev_vanc
 
-# Extract Calcium Gluconate events. Convert units. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 cagl = [30023, 221456, 227525, 42504, 43070, 45699, 46591, 44346, 46291]
-ev_cagl = ie.loc[ie.ITEMID.isin(cagl)]
-ind = ev_cagl.VALUEUOM.isin(['mg'])
-ev_cagl.loc[ind, 'VALUENUM'] = ev_cagl.loc[ind, 'VALUENUM']*0.001 
-ind1 = (ev_cagl.VALUENUM==0)
-ind2 = ev_cagl.VALUEUOM.isin(['mg', 'gm', 'grams'])
-ind3 = (ev_cagl.VALUENUM>=0)&(ev_cagl.VALUENUM<=200)
-ind = (ind2&ind3)|ind1
-med = ev_cagl.VALUENUM.loc[ind].median()
-ev_cagl.loc[~ind, 'VALUENUM'] = med
-ev_cagl['VALUEUOM'] = 'g'
+ev_cagl = ie.loc[ie.ITEMID.isin(cagl)].copy()
 ev_cagl['NAME'] = 'Calcium Gluconate'
 events = pd.concat([events, ev_cagl])
 del ev_cagl
 
-# Extract Furosemide events. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 furo = [30123, 221794, 228340]
-ev_furo = ie.loc[ie.ITEMID.isin(furo)]
-ind1 = (ev_furo.VALUENUM==0)
-ind2 = (ev_furo.VALUEUOM=='mg')
-ind3 = (ev_furo.VALUENUM>=0)&(ev_furo.VALUENUM<=250)
-ind = ind1|(ind2&ind3)
-med = ev_furo.VALUENUM.loc[ind].median()
-ev_furo.loc[~ind, 'VALUENUM'] = med
-ev_furo['VALUEUOM'] = 'mg'
+ev_furo = ie.loc[ie.ITEMID.isin(furo)].copy()
 ev_furo['NAME'] = 'Furosemide'
 events = pd.concat([events, ev_furo])
 del ev_furo
 
-# Extract Famotidine events. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 famo = [225907]
-ev_famo = ie.loc[ie.ITEMID.isin(famo)]
-ind1 = (ev_famo.VALUENUM==0)
-ind2 = (ev_famo.VALUEUOM=='dose')
-ind3 = (ev_famo.VALUENUM>=0)&(ev_famo.VALUENUM<=1)
-ind = ind1|(ind2&ind3)
-med = ev_famo.VALUENUM.loc[ind].median()
-ev_famo.loc[~ind, 'VALUENUM'] = med
-ev_famo['VALUEUOM'] = 'dose'
+ev_famo = ie.loc[ie.ITEMID.isin(famo)].copy()
 ev_famo['NAME'] = 'Famotidine'
 events = pd.concat([events, ev_famo])
 del ev_famo
 
-# Extract Piperacillin events. Convert units. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 pipe = [225893, 225892]
-ev_pipe = ie.loc[ie.ITEMID.isin(pipe)]
-ind1 = (ev_pipe.VALUENUM==0)
-ind2 = (ev_pipe.VALUEUOM=='dose')
-ind3 = (ev_pipe.VALUENUM>=0)&(ev_pipe.VALUENUM<=1)
-ind = ind1|(ind2&ind3)
-med = ev_pipe.VALUENUM.loc[ind].median()
-ev_pipe.loc[~ind, 'VALUENUM'] = med
-ev_pipe['VALUEUOM'] = 'dose'
+ev_pipe = ie.loc[ie.ITEMID.isin(pipe)].copy()
 ev_pipe['NAME'] = 'Piperacillin'
 events = pd.concat([events, ev_pipe])
 del ev_pipe
 
-# Extract Cefazolin events. Convert units. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 cefa = [225850]
-ev_cefa = ie.loc[ie.ITEMID.isin(cefa)]
-ind1 = (ev_cefa.VALUENUM==0)
-ind2 = (ev_cefa.VALUEUOM=='dose')
-ind3 = (ev_cefa.VALUENUM>=0)&(ev_cefa.VALUENUM<=2)
-ind = ind1|(ind2&ind3)
-med = ev_cefa.VALUENUM.loc[ind].median()
-ev_cefa.loc[~ind, 'VALUENUM'] = med 
-ev_cefa['VALUEUOM'] = 'dose'
+ev_cefa = ie.loc[ie.ITEMID.isin(cefa)].copy()
 ev_cefa['NAME'] = 'Cefazolin'
 events = pd.concat([events, ev_cefa])
 del ev_cefa
 
-# Extract Fiber events. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 fibe = [225936, 30166, 30073, 227695, 30088, 225928, 226051, 226050, 226048, 45381, 45597, 227699, 227696, 44218, 45406, 44675, 226049, 44202, 45370, 227698, 226027, 42106, 43994, 45865, 44318, 42091, 44699, 44010, 43134, 44045, 43088, 42641, 45691, 45515, 45777, 42663, 42027, 44425, 45657, 45775, 44631, 44106, 42116, 44061, 44887, 42090, 42831, 45541, 45497, 46789, 44765, 42050]
-ev_fibe = ie.loc[ie.ITEMID.isin(fibe)]
-ind1 = (ev_fibe.VALUENUM==0)
-ind2 = (ev_fibe.VALUEUOM=='ml')
-ind3 = (ev_fibe.VALUENUM>=0)&(ev_fibe.VALUENUM<=1600)
-ind = ind1|(ind2&ind3)
-med = ev_fibe.VALUENUM.loc[ind].median()
-ev_fibe.loc[~ind, 'VALUENUM'] = med 
+ev_fibe = ie.loc[ie.ITEMID.isin(fibe)].copy()
 ev_fibe['NAME'] = 'Fiber'
-ev_fibe['VALUEUOM'] = 'ml'
 events = pd.concat([events, ev_fibe])
 del ev_fibe
 
-# Extract Pantoprazole events. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 pant = [225910, 40549, 41101, 41583, 44008, 40700, 40550]
-ev_pant = ie.loc[ie.ITEMID.isin(pant)]
-ind = (ev_pant.VALUENUM>0)
-ev_pant.loc[ind, 'VALUENUM'] = 1
-ind = (ev_pant.VALUENUM>=0)
-med = ev_pant.VALUENUM.loc[ind].median()
-ev_pant.loc[~ind, 'VALUENUM'] = med
+ev_pant = ie.loc[ie.ITEMID.isin(pant)].copy()
 ev_pant['NAME'] = 'Pantoprazole'
-ev_pant['VALUEUOM'] = 'dose'
 events = pd.concat([events, ev_pant])
 del ev_pant
 
-# Extract Magnesium Sulphate events. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 masu = [222011, 30027, 227524]
-ev_masu = ie.loc[ie.ITEMID.isin(masu)]
-ind = (ev_masu.VALUEUOM=='mg')
-ev_masu.loc[ind, 'VALUENUM'] = ev_masu.loc[ind, 'VALUENUM']*0.001
-ind1 = (ev_masu.VALUENUM==0)
-ind2 = ev_masu.VALUEUOM.isin(['gm', 'grams', 'mg'])
-ind3 = (ev_masu.VALUENUM>=0)&(ev_masu.VALUENUM<=125)
-ind = ind1|(ind2&ind3)
-med = ev_masu.VALUENUM.loc[ind].median()
-ev_masu.loc[~ind, 'VALUENUM'] = med 
-ev_masu['VALUEUOM'] = 'g'
+ev_masu = ie.loc[ie.ITEMID.isin(masu)].copy()
 ev_masu['NAME'] = 'Magnesium Sulphate'
 events = pd.concat([events, ev_masu])
 del ev_masu
 
-# Extract Potassium Chloride events. Remove outliers.
+# Preserve the legacy variable label without converting or imputing amounts.
 poch = [30026, 225166, 227536]
-ev_poch = ie.loc[ie.ITEMID.isin(poch)]
-ind1 = (ev_poch.VALUENUM==0)
-ind2 = ev_poch.VALUEUOM.isin(['mEq', 'mEq.'])
-ind3 = (ev_poch.VALUENUM>=0)&(ev_poch.VALUENUM<=501)
-ind = ind1|(ind2&ind3)
-med = ev_poch.VALUENUM.loc[ind].median()
-ev_poch.loc[~ind, 'VALUENUM'] = med 
-ev_poch['VALUEUOM'] = 'mEq'
+ev_poch = ie.loc[ie.ITEMID.isin(poch)].copy()
 ev_poch['NAME'] = 'KCl'
 events = pd.concat([events, ev_poch])
 del ev_poch
 
-# Extract multiple events. Remove outliers.
+# Preserve legacy input item/name mappings without amount/rate transformations.
 mida = [30124, 221668]
 prop = [30131, 222168]
 albu25 = [220862, 30009]
@@ -671,25 +594,14 @@ features = {'Midazolam': [mida, [0, 500], 'mg'],
             }
 
 for k, v in features.items():
-    print (k)
-    ev_k = ie.loc[ie.ITEMID.isin(v[0])]
-    ind = (ev_k.VALUENUM>=v[1][0])&(ev_k.VALUENUM<=v[1][1])
-    med = ev_k.VALUENUM.loc[ind].median()
-    ev_k.loc[~ind, 'VALUENUM'] = med
+    ev_k = ie.loc[ie.ITEMID.isin(v[0])].copy()
     ev_k['NAME'] = k
-    ev_k['VALUEUOM'] = v[2]
     events = pd.concat([events, ev_k])
 del ev_k
 
-# Extract heparin events. (Missed earlier.)
-ev_k = ie.loc[ie.ITEMID.isin(hepa)]
-ind1 = ev_k.VALUEUOM.isin(['U', 'units'])
-ind2 = (ev_k.VALUENUM>=0)&(ev_k.VALUENUM<=25300)
-ind = (ind1&ind2)
-med = ev_k.VALUENUM.loc[ind].median()
-ev_k.loc[~ind, 'VALUENUM'] = med
+# Keep item/name selection only; raw units and values are audited separately.
+ev_k = ie.loc[ie.ITEMID.isin(hepa)].copy()
 ev_k['NAME'] = 'Heparin'
-ev_k['VALUEUOM'] = 'units'
 events = pd.concat([events, ev_k])
 del ev_k
 
@@ -702,8 +614,44 @@ ie_mv.rename(columns={'STARTTIME':'CHARTTIME', 'PATIENTWEIGHT':'VALUENUM'}, inpl
 ie_mv = ie_mv.loc[(ie_mv.VALUENUM>=0)&(ie_mv.VALUENUM<=300)]
 ie_mv['VALUEUOM'] = 'kg'
 ie_mv['NAME'] = 'Weight'
+ie_mv['TABLE'] = 'input_weight'
 events = pd.concat([events, ie_mv])
 del ie_mv
+
+# Preserve selected raw inputevent intervals in the audit table, without deriving retrospective rates.
+input_columns = [
+    'subject_id', 'hadm_id', 'stay_id', 'caregiver_id', 'starttime', 'endtime', 'storetime',
+    'itemid', 'amount', 'amountuom', 'rate', 'rateuom', 'orderid', 'linkorderid',
+    'ordercategoryname', 'secondaryordercategoryname', 'ordercomponenttypedescription',
+    'ordercategorydescription', 'patientweight', 'totalamount',
+    'totalamountuom', 'isopenbag', 'continueinnextdept', 'cancelreason',
+    'statusdescription', 'originalamount', 'originalamountuom', 'originalrate', 'originalrateuom',
+]
+input_summary = {'row_count': 0, 'missing_available_time': 0, 'by_variable': {}, 'raw_rate_amount_unit_counts': {}}
+input_row_offset = 0
+selected_stays = set(icu.ICUSTAY_ID.astype(int))
+for chunk in pd.read_csv(
+    mimic_data_dir + 'icu/inputevents.csv', usecols=input_columns, chunksize=1000000, low_memory=False
+):
+    chunk['source_row_id'] = np.arange(input_row_offset, input_row_offset + len(chunk))
+    input_row_offset += len(chunk)
+    chunk = chunk.loc[chunk.stay_id.isin(selected_stays)].copy()
+    chunk.rename(columns=legacy_column_name, inplace=True)
+    input_audit = build_input_event_rows(chunk, events, d_items_audit, d_labitems_audit)
+    append_event_rows(audit_tmp_path, input_audit, append=True)
+    merge_summaries(input_summary, summarize_event_rows(input_audit))
+    del input_audit, chunk
+
+audit_counts['inputevents'] = input_summary
+# Inputevent-derived features are withheld until a reliable as-of state is implemented.
+operational_input_exclusions = int(events.TABLE.isin(['input_mv', 'input_weight']).sum())
+audit_counts['operational_legacy_exclusions'] = {
+    'inputevents_and_input_weight_rows': operational_input_exclusions,
+    'reason': 'inputevent state is not reconstructed as known at the forecast cutoff',
+}
+audit_tmp_path.replace(audit_path)
+write_audit_report('data/clinical_event_audit.json', audit_counts, dictionary_hashes)
+events = events.loc[~events.TABLE.isin(['input_mv', 'input_weight'])]
 
 # Save data.
 events.to_csv('data/mimic_iv_events.csv', index=False)
