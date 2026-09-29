@@ -4,6 +4,8 @@ from torch.optim import Adam
 from tqdm import tqdm
 import pickle
 
+from reproducibility import seed_everything
+
 def train(
     model,
     config,
@@ -11,7 +13,9 @@ def train(
     valid_loader=None,
     valid_epoch_interval=10,
     foldername='',
+    seed=2026,
 ):
+    seed_everything(seed)
     optimizer = Adam(model.parameters(), lr=config['train']['lr'], weight_decay=5e-8)
     if foldername != '':
         output_path = foldername + '/model.pth'
@@ -47,7 +51,9 @@ def train(
             lr_scheduler.step()
         if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
-            CRPS_valid, _ = evaluate(0, model, valid_loader, nsample=5, foldername=foldername)
+            CRPS_valid, _ = evaluate(
+                0, model, valid_loader, nsample=5, foldername=foldername, seed=seed + 1
+            )
             print('{} (best)'.format(round(best_valid_loss, 4)))
             print('{} (current)'.format(round(CRPS_valid, 4)))
             if best_valid_loss > CRPS_valid:
@@ -92,7 +98,12 @@ def calc_metrics(is_test, all_generation, all_samples_y):
     
     return CRPS.item() / len(quantiles), MSE
 
-def evaluate(is_test, model, data_loader, nsample=100, foldername=""):
+def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026):
+    generator = None
+    if seed is not None:
+        device = next(model.parameters()).device
+        generator = torch.Generator(device=device).manual_seed(seed)
+
     with torch.no_grad():
         model.eval()
         all_samples_x = []
@@ -101,7 +112,7 @@ def evaluate(is_test, model, data_loader, nsample=100, foldername=""):
         with tqdm(data_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, batch in enumerate(it, start=1):
                 # ground truth values will be replaced with pure noise before generation
-                output = model.evaluate(batch, nsample)
+                output = model.evaluate(batch, nsample, generator=generator)
                 generation, samples_y, samples_x = output
                 all_generation.append(generation)
                 all_samples_x.append(samples_x)

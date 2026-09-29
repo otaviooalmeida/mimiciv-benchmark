@@ -1,9 +1,10 @@
 import pickle
 import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import DataLoader, Dataset
 
-def triplet_generate(data, info, size, target_var):
+def triplet_generate(data, info, size, target_var, rng=None):
     triplets_x = np.zeros((len(data), 4, size))
     triplets_y = np.zeros((len(data), 4, 10 * len(target_var)))
     
@@ -48,7 +49,8 @@ def triplet_generate(data, info, size, target_var):
                             break
                         
                 else:
-                    s = int(np.random.rand() * x_len)
+                    random_value = np.random.rand() if rng is None else rng.random()
+                    s = int(random_value * x_len)
                     for k in range(3):
                         triplets_x[i, k, pos] = data[i][k][s]
                         data[i][k] = np.delete(data[i][k], s)
@@ -69,8 +71,9 @@ def triplet_generate(data, info, size, target_var):
     return triplets_x, triplets_y, info
                     
 class MIMIC_Dataset(Dataset):
-    def __init__(self, data, info, size, target_var, use_index_list=None):
-        self.samples_x, self.samples_y, self.info = triplet_generate(data, info, size, target_var)
+    def __init__(self, data, info, size, target_var, use_index_list=None, seed=2026):
+        rng = np.random.default_rng(seed)
+        self.samples_x, self.samples_y, self.info = triplet_generate(data, info, size, target_var, rng=rng)
         self.info = np.array(self.info.drop(columns=['sub_id']))
         self.use_index_list = np.arange(len(self.samples_x))
     
@@ -87,15 +90,24 @@ class MIMIC_Dataset(Dataset):
     def __len__(self):
         return len(self.use_index_list)
         
-def get_dataloader(data_path, var_path, size, batch_size=32):
+def get_dataloader(data_path, var_path, size, batch_size=32, seed=2026):
     train_set, train_info, valid_set, valid_info, test_set, test_info = pickle.load(open(data_path, 'rb'))
     var, target_var = pickle.load(open(var_path, 'rb'))
-    train_data = MIMIC_Dataset(train_set, train_info, size, target_var)
-    valid_data = MIMIC_Dataset(valid_set, valid_info, size, target_var)
-    test_data = MIMIC_Dataset(test_set, test_info, size, target_var)
-    
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=1)
-    valid_loader = DataLoader(valid_data, batch_size=batch_size, shuffle=1)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=1)
+    train_data = MIMIC_Dataset(train_set, train_info, size, target_var, seed=seed)
+    valid_data = MIMIC_Dataset(valid_set, valid_info, size, target_var, seed=seed + 1)
+    test_data = MIMIC_Dataset(test_set, test_info, size, target_var, seed=seed + 2)
+
+    train_generator = torch.Generator().manual_seed(seed)
+    valid_generator = torch.Generator().manual_seed(seed + 1)
+    test_generator = torch.Generator().manual_seed(seed + 2)
+    train_loader = DataLoader(
+        train_data, batch_size=batch_size, shuffle=True, generator=train_generator
+    )
+    valid_loader = DataLoader(
+        valid_data, batch_size=batch_size, shuffle=False, generator=valid_generator
+    )
+    test_loader = DataLoader(
+        test_data, batch_size=batch_size, shuffle=False, generator=test_generator
+    )
     
     return train_loader, valid_loader, test_loader

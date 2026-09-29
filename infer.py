@@ -11,11 +11,10 @@ import numpy as np
 import torch
 import yaml
 from matplotlib.patches import Patch
-from torch.utils.data import DataLoader
-
 from dataset import get_dataloader
 from diff import TDSTF
 from exe import calc_metrics
+from reproducibility import seed_everything, validate_split_seed
 
 
 TARGET_UNITS = {"HR": "bpm", "SBP": "mmHg", "DBP": "mmHg", "Temperature": "°C", "O2 Saturation": "%"}
@@ -35,7 +34,8 @@ def parse_args():
     parser.add_argument("--nsample", type=int, default=100, help="Amostras de difusão por previsão.")
     parser.add_argument("--n-examples", type=int, default=3, help="Número de internações a plotar em detalhe.")
     parser.add_argument("--output-dir", default=None, help="Pasta de saída (padrão: ao lado do checkpoint).")
-    parser.add_argument("--seed", type=int, default=2026, help="Semente para reproduzir as amostras.")
+    parser.add_argument("--seed", type=int, default=None, help="Semente das amostras (padrão: config/base.yaml).")
+    parser.add_argument("--data-seed", type=int, default=None, help="Semente de seleção dos dados (padrão: seed do checkpoint).")
     return parser.parse_args()
 
 
@@ -62,12 +62,16 @@ def unscale(values, feature_id, means, stds):
     return values * scale + means[feature_id]
 
 
-def collect_forecasts(model, data_loader, nsample):
+def collect_forecasts(model, data_loader, nsample, seed=2026):
+    device = next(model.parameters()).device
+    generator = torch.Generator(device=device).manual_seed(seed)
     generations, targets, histories, infos = [], [], [], []
     model.eval()
     with torch.no_grad():
         for batch in data_loader:
-            generation, samples_y, samples_x = model.evaluate(batch, nsample)
+            generation, samples_y, samples_x = model.evaluate(
+                batch, nsample, generator=generator
+            )
             generations.append(generation.detach().cpu())
             targets.append(samples_y.detach().cpu())
             histories.append(samples_x.detach().cpu())
@@ -246,46 +250,57 @@ def main():
     if args.nsample < 1:
         raise ValueError("--nsample deve ser pelo menos 1.")
     checkpoint = resolve_checkpoint(args.checkpoint)
+    with Path("config/base.yaml").open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+    args.seed = config.get("seed", 2026) if args.seed is None else args.seed
+    if args.seed < 0:
+        raise ValueError("--seed deve ser um inteiro não negativo.")
+    seed_everything(args.seed)
+
+    run_metadata_path = checkpoint.parent / "run_metadata.json"
+    if run_metadata_path.is_file():
+        with run_metadata_path.open("r", encoding="utf-8") as metadata_file:
+            run_metadata = json.load(metadata_file)
+        default_data_seed = run_metadata.get("data_seed", run_metadata.get("seed", config.get("seed", 2026)))
+    else:
+        default_data_seed = config.get("seed", 2026)
+    args.data_seed = default_data_seed if args.data_seed is None else args.data_seed
+    if args.data_seed < 0:
+        raise ValueError("--data-seed deve ser um inteiro não negativo.")
+    validate_split_seed("preprocess/data/splits.pkl", args.data_seed)
+
     device = args.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA foi solicitada, mas não está disponível. Use --device cpu.")
-
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-
-    with Path("config/base.yaml").open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
     with Path("preprocess/data/var.pkl").open("rb") as file:
         variable_names, target_ids = pickle.load(file)
     with Path("preprocess/data/mean_std.pkl").open("rb") as file:
         means, stds = pickle.load(file)
 
-    output_dir = Path(args.output_dir).expanduser() if args.output_dir else checkpoint.parent / f"inference_n{args.nsample}"
+    output_dir = Path(args.output_dir).expanduser() if args.output_dir else checkpoint.parent / f"inference_n{args.nsample}_seed{args.seed}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _, _, test_loader_shuffled = get_dataloader(
-        "preprocess/data/dataset.pkl", "preprocess/data/var.pkl", config["diffusion"]["size"],
+    _, _, test_loader = get_dataloader(
+        "preprocess/data/dataset.pkl",
+        "preprocess/data/var.pkl",
+        config["diffusion"]["size"],
         batch_size=config["train"]["batch_size"],
-    )
-    test_loader = DataLoader(
-        test_loader_shuffled.dataset,
-        batch_size=test_loader_shuffled.batch_size,
-        shuffle=False,
-        num_workers=test_loader_shuffled.num_workers,
-        pin_memory=test_loader_shuffled.pin_memory,
+        seed=args.data_seed,
     )
 
     model = TDSTF(config, device).to(device)
     model.load_state_dict(torch.load(checkpoint, map_location=device))
-    generation, samples_y, samples_x, info = collect_forecasts(model, test_loader, args.nsample)
+    generation, samples_y, samples_x, info = collect_forecasts(
+        model, test_loader, args.nsample, seed=args.seed
+    )
 
     sacrps, mse = calc_metrics(1, generation, samples_y)
     metrics = {
         "checkpoint": str(checkpoint),
         "device": device,
         "nsample": args.nsample,
+        "seed": args.seed,
+        "data_seed": args.data_seed,
         "test_samples": int(generation.shape[0]),
         "SACRPS": float(sacrps),
         "MSE": float(mse.item() if torch.is_tensor(mse) else mse),
