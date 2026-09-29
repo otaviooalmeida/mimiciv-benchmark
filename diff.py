@@ -44,14 +44,20 @@ class TDSTF(nn.Module):
 
         return loss
 
-    def forecast(self, samples_x, samples_y, info, n_samples):
+    def forecast(self, samples_x, samples_y, info, n_samples, generator=None):
         # Forecasting updates the noisy target in place at every diffusion step.
         # Preserve the caller's tensors so evaluate() can return the real target.
         samples_x = samples_x.clone()
         samples_y = samples_y.clone()
         generation = torch.zeros(n_samples, samples_y.shape[0], samples_y.shape[-1]).to(self.device)
         for i in range(n_samples):
-            samples_y[:, 2] = torch.randn_like(samples_y[:, 2]) * samples_y[:, 3]
+            initial_noise = torch.randn(
+                samples_y[:, 2].shape,
+                dtype=samples_y.dtype,
+                device=samples_y.device,
+                generator=generator,
+            )
+            samples_y[:, 2] = initial_noise * samples_y[:, 3]
             for t in range(self.num_steps - 1, -1, -1):
                 mask_x = samples_x[:, 3]
                 mask_y = samples_y[:, 3]
@@ -64,7 +70,12 @@ class TDSTF(nn.Module):
                 coeff2 = (1 - self.alpha_hat[t]) / (1 - self.alpha[t]) ** 0.5
                 samples_y[:, 2] = coeff1 * (samples_y[:, 2] - coeff2 * predicted) * samples_y[:, 3]
                 if t > 0:
-                    noise = torch.randn_like(samples_y[:, 2]) * samples_y[:, 3]
+                    noise = torch.randn(
+                        samples_y[:, 2].shape,
+                        dtype=samples_y.dtype,
+                        device=samples_y.device,
+                        generator=generator,
+                    ) * samples_y[:, 3]
                     sigma = ((1.0 - self.alpha[t - 1]) / (1.0 - self.alpha[t]) * self.beta[t]) ** 0.5
                     samples_y[:, 2] += sigma * noise
 
@@ -72,9 +83,9 @@ class TDSTF(nn.Module):
             
         return generation.permute(1, 2, 0)
 
-    def evaluate(self, batch, n_samples):
+    def evaluate(self, batch, n_samples, generator=None):
         samples_x, samples_y, info = self.process(batch)
         with torch.no_grad():
-            generation = self.forecast(samples_x, samples_y, info, n_samples)
+            generation = self.forecast(samples_x, samples_y, info, n_samples, generator=generator)
             
         return generation, samples_y, samples_x
