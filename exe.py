@@ -75,7 +75,7 @@ def calc_metrics(is_test, all_generation, all_samples_y):
         gt = all_samples_y[:, 2]
         mask = all_samples_y[:, 3]
         prediction = all_generation.mean(dim=2)
-        MSE = ((prediction.values - gt) * mask) ** 2
+        MSE = ((prediction - gt) * mask) ** 2
         MSE = MSE.sum() / mask.sum()
     else:
         quantiles = np.arange(0.25, 1.0, 0.25)
