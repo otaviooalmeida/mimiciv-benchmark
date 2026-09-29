@@ -74,7 +74,13 @@ class MIMIC_Dataset(Dataset):
     def __init__(self, data, info, size, target_var, use_index_list=None, seed=2026):
         rng = np.random.default_rng(seed)
         self.samples_x, self.samples_y, self.info = triplet_generate(data, info, size, target_var, rng=rng)
-        self.info = np.array(self.info.drop(columns=['sub_id']))
+        if 'sub_id' in self.info.columns:
+            patient_ids = self.info['sub_id'].to_numpy()
+            sample_info = self.info.drop(columns=['sub_id']).to_numpy()
+            # Keep ts_ind/x_len/y_len at their existing positions and append patient ID.
+            self.info = np.column_stack((sample_info, patient_ids))
+        else:
+            self.info = np.asarray(self.info)
         self.use_index_list = np.arange(len(self.samples_x))
     
     def __getitem__(self, org_index):

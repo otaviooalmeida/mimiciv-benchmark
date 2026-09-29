@@ -54,5 +54,20 @@ enabled, which can reduce performance or report an unsupported nondeterministic 
 Reproduction is intended for the same data, software versions, device, and hardware; exact
 results across different hardware/CUDA versions are not guaranteed.
 
+# Evaluation metrics
+
+Validation and test reports include mean-based MSE, median-based MAE, ensemble CRPS,
+and 80%/95% interval coverage, width, and interval score. Per-signal metrics are in
+original clinical units; cross-signal micro, macro-by-variable, and patient means use
+frozen per-signal scales from training patients. Numerators and denominators are saved
+alongside each aggregate. The reference is stored in
+`preprocess/data/evaluation_reference_scale.pkl`: retain it unchanged when changing the
+normalizer to keep comparisons on the same scale. `infer.py` requires this artifact.
+
+`NACRPS` retains the legacy quantile-grid formula and its normalization by the sum of
+absolute standardized targets; validation and test retain their historical quantile
+sets. It is reported for continuity, not as a score directly comparable across tasks
+or cohorts.
+
 # Acknowledgements
 A part of the codes is based on [CSDI](https://github.com/ermongroup/CSDI) and [STraTS](https://github.com/sindhura97/STraTS)

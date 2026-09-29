@@ -63,5 +63,5 @@ print('test')
 NACRPS, MSE = evaluate(
     1, model, test_loader, nsample=args.nsample, foldername=foldername, seed=args.seed
 )
-print('NACRPS: {}'.format(NACRPS))
-print('MSE: {}'.format(MSE))
+print('NACRPS (legado): {}'.format(NACRPS))
+print('MSE da média, normalizado (legado): {}'.format(MSE))

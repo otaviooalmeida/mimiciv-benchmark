@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from attn import ResNet
+from evaluation import extract_targets
 
 class TDSTF(nn.Module):
     def __init__(self, config, device):
@@ -30,9 +31,14 @@ class TDSTF(nn.Module):
         samples_x, samples_y, info = self.process(batch)
         t = torch.randint(0, self.num_steps, [len(samples_x)]).to(self.device)
         current_alpha = self.alpha_torch[t]
-        noise = torch.randn((len(samples_x), size_y)).to(samples_y.device)
+        targets = extract_targets(samples_y)
+        if size_y != targets.values.shape[1]:
+            raise ValueError(f"size_y ({size_y}) must match target length ({targets.values.shape[1]})")
         mask_x = samples_x[:, 3]
-        mask_y = samples_y[:, 3]
+        mask_y = targets.mask
+        samples_y[:, 2] = targets.values
+        samples_y[:, 3] = mask_y.to(samples_y.dtype)
+        noise = torch.randn((len(samples_x), size_y), device=samples_y.device)
         samples_x[:, 0] = torch.where(mask_x == 1, samples_x[:, 0], self.lv)
         samples_x[:, 1] = torch.where(mask_x == 1, samples_x[:, 1], -1)
         samples_y[:, 0] = torch.where(mask_y == 1, samples_y[:, 0], self.lv)
@@ -40,7 +46,7 @@ class TDSTF(nn.Module):
         samples_y[:, 2] = ((current_alpha ** 0.5) * samples_y[:, 2] + ((1.0 - current_alpha) ** 0.5) * noise) * mask_y
         predicted = self.res_model(samples_x, samples_y, info, t)
         residual = torch.where(mask_y == 1, noise - predicted, 0)
-        loss = (residual ** 2).sum() / info[:, 2].sum()
+        loss = (residual ** 2).sum() / mask_y.sum().clamp_min(1)
 
         return loss
 
@@ -49,6 +55,9 @@ class TDSTF(nn.Module):
         # Preserve the caller's tensors so evaluate() can return the real target.
         samples_x = samples_x.clone()
         samples_y = samples_y.clone()
+        targets = extract_targets(samples_y)
+        samples_y[:, 2] = targets.values
+        samples_y[:, 3] = targets.mask.to(samples_y.dtype)
         generation = torch.zeros(n_samples, samples_y.shape[0], samples_y.shape[-1]).to(self.device)
         for i in range(n_samples):
             initial_noise = torch.randn(

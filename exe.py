@@ -1,9 +1,11 @@
+import json
 import numpy as np
 import torch
 from torch.optim import Adam
 from tqdm import tqdm
 import pickle
 
+from evaluation import calculate_predictive_metrics, legacy_nacrps_and_mse, legacy_nacrps_statistics
 from reproducibility import seed_everything
 
 def train(
@@ -51,14 +53,14 @@ def train(
             lr_scheduler.step()
         if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
-            CRPS_valid, _ = evaluate(
+            NACRPS_valid, _ = evaluate(
                 0, model, valid_loader, nsample=5, foldername=foldername, seed=seed + 1
             )
             print('{} (best)'.format(round(best_valid_loss, 4)))
-            print('{} (current)'.format(round(CRPS_valid, 4)))
-            if best_valid_loss > CRPS_valid:
+            print('{} (current)'.format(round(NACRPS_valid, 4)))
+            if best_valid_loss > NACRPS_valid:
                 ct = 0
-                best_valid_loss = CRPS_valid
+                best_valid_loss = NACRPS_valid
                 torch.save(model.state_dict(), output_path)
                 print('model updated')
             else:
@@ -73,30 +75,10 @@ def train(
         model.load_state_dict(torch.load(output_path))
 
 def calc_metrics(is_test, all_generation, all_samples_y):
-    MSE = None
-    target = all_samples_y[:, 2]
-    if is_test == 1:
-        quantiles = np.arange(0.05, 1.0, 0.05)
-        # calculate MSE
-        gt = all_samples_y[:, 2]
-        mask = all_samples_y[:, 3]
-        prediction = all_generation.mean(dim=2)
-        MSE = ((prediction - gt) * mask) ** 2
-        MSE = MSE.sum() / mask.sum()
-    else:
-        quantiles = np.arange(0.25, 1.0, 0.25)
-    denom = torch.sum(torch.abs(target))
-    CRPS = 0
-    for i in range(len(quantiles)):
-        q_pred = []
-        for j in range(len(all_generation)):
-            q_pred.append(torch.quantile(all_generation[j], quantiles[i], dim = -1))
-        q_pred = torch.cat(q_pred, 0).reshape(-1)
-        target = target.reshape(-1)
-        q_loss = 2 * torch.sum(torch.abs((q_pred - target) * all_samples_y[:, 3].reshape(-1) * ((target <= q_pred) * 1.0 - quantiles[i])))
-        CRPS += q_loss / denom
-    
-    return CRPS.item() / len(quantiles), MSE
+    """Return the legacy NACRPS and mean-forecast standardized MSE."""
+    nacrps, mse = legacy_nacrps_and_mse(is_test, all_generation, all_samples_y)
+    mse_tensor = torch.as_tensor(mse, dtype=all_generation.dtype, device=all_generation.device)
+    return nacrps, mse_tensor
 
 def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026):
     generator = None
@@ -109,6 +91,7 @@ def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026)
         all_samples_x = []
         all_samples_y = []
         all_generation = []
+        all_info = []
         with tqdm(data_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, batch in enumerate(it, start=1):
                 # ground truth values will be replaced with pure noise before generation
@@ -117,12 +100,51 @@ def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026)
                 all_generation.append(generation)
                 all_samples_x.append(samples_x)
                 all_samples_y.append(samples_y)
+                all_info.append(batch["info"])
             
             all_generation = torch.cat(all_generation)
             all_samples_x = torch.cat(all_samples_x)
             all_samples_y = torch.cat(all_samples_y)
-            CRPS, MSE = calc_metrics(is_test, all_generation, all_samples_y)
+            all_info = torch.cat(all_info)
+            NACRPS, MSE = calc_metrics(is_test, all_generation, all_samples_y)
+            if foldername:
+                with open("preprocess/data/var.pkl", "rb") as file:
+                    variable_names, target_ids = pickle.load(file)
+                with open("preprocess/data/mean_std.pkl", "rb") as file:
+                    means, stds = pickle.load(file)
+                reference_path = "preprocess/data/evaluation_reference_scale.pkl"
+                reference_scales = None
+                reference_metadata = None
+                try:
+                    with open(reference_path, "rb") as file:
+                        reference = pickle.load(file)
+                    reference_scales = reference["scales"]
+                    reference_metadata = {
+                        key: reference.get(key)
+                        for key in ("version", "seed", "source")
+                    }
+                except FileNotFoundError:
+                    pass
+                detailed = calculate_predictive_metrics(
+                    all_generation, all_samples_y, variable_names, target_ids,
+                    means, stds, reference_scales=reference_scales, info=all_info,
+                )
+                split_name = "test" if is_test == 1 else "validation"
+                report = {
+                    "split": split_name,
+                    "NACRPS": NACRPS,
+                    "NACRPS_statistics": legacy_nacrps_statistics(is_test, all_generation, all_samples_y),
+                    "NACRPS_definition": (
+                        "Legacy quantile score: mean over q=.05..95 step .05 on test "
+                        "or q=.25,.50,.75 on validation; normalized by sum(abs(valid standardized targets))."
+                    ),
+                    "MSE_mean_standardized_legacy": float(MSE.item()),
+                    "evaluation_reference_scale": reference_metadata,
+                    "predictive_metrics": detailed,
+                }
+                with open(foldername + "/metrics_" + split_name + "_nsample" + str(nsample) + ".json", "w", encoding="utf-8") as file:
+                    json.dump(report, file, indent=2, ensure_ascii=False, allow_nan=True)
             if is_test == 1:
                 pickle.dump([all_generation, all_samples_y, all_samples_x], open(foldername + "/generated_outputs" + str(nsample) + ".pkl", "wb"))
-                pickle.dump([CRPS, MSE], open(foldername + "/result_nsample" + str(nsample) + ".pkl", "wb"))
-            return CRPS, MSE
+                pickle.dump([NACRPS, MSE], open(foldername + "/result_nsample" + str(nsample) + ".pkl", "wb"))
+            return NACRPS, MSE

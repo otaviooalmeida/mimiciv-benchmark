@@ -34,24 +34,59 @@ info = pd.DataFrame(info, columns = ['ts_ind', 'sub_id', 'x_len', 'y_len'])
 # Patient-wise split. Keep split membership in a sidecar for audit/reuse.
 train_sub, valid_sub, test_sub = split_subjects(info['sub_id'].to_numpy(), seed=args.seed)
 
-# normalize
-rec = []
-for i in range(len(var)):
-    rec.append([])
-    
+# Normalize with the existing pipeline statistics. Separately freeze a training-only
+# reference scale in original units so reported metrics survive normalizer changes.
+rec = [[] for _ in range(len(var))]
+reference_rec = [[] for _ in range(len(var))]
+train_subjects = set(train_sub.tolist())
+
 for sub_id in np.concatenate((train_sub, valid_sub)):
     index = np.array(info.loc[info.sub_id == sub_id].index)
     for i in index:
         stay = samples[i]
         for j in range(info.iloc[i]['x_len']):
-            rec[stay[0][j]].append(stay[2][j])
-            
+            feature_id = stay[0][j]
+            value = stay[2][j]
+            rec[feature_id].append(value)
+            if sub_id in train_subjects:
+                reference_rec[feature_id].append(value)
+
 mean = np.full(len(var), np.nan)
 std = np.full(len(var), np.nan)
 for i in range(len(var)):
     if len(rec[i]) > 0:
         mean[i] = np.array(rec[i]).mean()
         std[i] = np.array(rec[i]).std()
+
+reference_scale_path = Path('data/evaluation_reference_scale.pkl')
+if reference_scale_path.is_file():
+    with reference_scale_path.open('rb') as reference_file:
+        reference = pickle.load(reference_file)
+    if reference.get('variable_names') != list(var) or not np.array_equal(reference.get('target_ids'), target_var):
+        raise ValueError('Frozen evaluation scales do not match the current variable layout; choose a new benchmark reference explicitly.')
+    frozen_scales = np.asarray(reference.get('scales'), dtype=float)
+    if frozen_scales.shape != (len(var),) or not np.isfinite(frozen_scales[target_var]).all() or np.any(frozen_scales[target_var] <= 0):
+        raise ValueError('Frozen evaluation scales are missing or invalid for target variables.')
+else:
+    reference_scales = np.ones(len(var), dtype=float)
+    for feature_id in target_var:
+        observations = np.asarray(reference_rec[int(feature_id)], dtype=float)
+        if not len(observations) or not np.isfinite(observations).all():
+            raise ValueError('Cannot create a finite frozen evaluation scale for target {}'.format(var[int(feature_id)]))
+        scale = float(observations.std())
+        if not np.isfinite(scale) or scale <= 0:
+            raise ValueError('Frozen evaluation scale must be positive for target {}'.format(var[int(feature_id)]))
+        reference_scales[int(feature_id)] = scale
+    reference = {
+        'version': 1,
+        'variable_names': list(var),
+        'target_ids': np.asarray(target_var, dtype=int),
+        'scales': reference_scales,
+        'source': 'raw observed context values from training patients',
+        'seed': int(args.seed),
+    }
+    with reference_scale_path.open('wb') as reference_file:
+        pickle.dump(reference, reference_file)
 
 sub_sets = [train_sub, valid_sub, test_sub]
 data_sets = [[], [], []]

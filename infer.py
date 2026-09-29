@@ -14,10 +14,16 @@ from matplotlib.patches import Patch
 from dataset import get_dataloader
 from diff import TDSTF
 from exe import calc_metrics
+from evaluation import (
+    TARGET_UNITS,
+    calculate_predictive_metrics,
+    extract_targets,
+    legacy_nacrps_statistics,
+    validate_forecasts,
+)
 from reproducibility import seed_everything, validate_split_seed
 
 
-TARGET_UNITS = {"HR": "bpm", "SBP": "mmHg", "DBP": "mmHg", "Temperature": "°C", "O2 Saturation": "%"}
 TARGET_DISPLAY_NAMES = {"O2 Saturation": "SpO₂"}
 
 
@@ -83,15 +89,19 @@ def collect_forecasts(model, data_loader, nsample, seed=2026):
 
 def prediction_rows(generation, samples_y, info, variable_names, target_ids, means, stds):
     rows = []
-    gen, target, metadata = generation.numpy(), samples_y.numpy(), info.numpy()
+    extracted = extract_targets(samples_y)
+    generation = validate_forecasts(generation, extracted)
+    gen, target, metadata = generation, samples_y.numpy(), info.numpy()
+    valid = extracted.mask.numpy()
+    feature_ids = extracted.feature_ids.numpy()
+    actual_values = extracted.values.numpy()
     for sample_index in range(len(gen)):
         sample_id = int(metadata[sample_index, 0])
-        valid = target[sample_index, 3] > 0
-        feature_ids = target[sample_index, 0].astype(np.int64)
-        minutes, actuals = target[sample_index, 1], target[sample_index, 2]
+        minutes = target[sample_index, 1]
+        actuals = actual_values[sample_index]
         for feature_id in target_ids:
             feature_id = int(feature_id)
-            for position in np.flatnonzero(valid & (feature_ids == feature_id)):
+            for position in np.flatnonzero(valid[sample_index] & (feature_ids[sample_index] == feature_id)):
                 draws = unscale(gen[sample_index, position], feature_id, means, stds)
                 actual = float(unscale(actuals[position], feature_id, means, stds))
                 rows.append({
@@ -107,47 +117,21 @@ def prediction_rows(generation, samples_y, info, variable_names, target_ids, mea
     return rows
 
 
-def mse_by_signal(generation, samples_y, variable_names, target_ids, means, stds):
-    """Compute point-forecast MSE per target, in normalized and clinical units."""
-    gen = generation.numpy()
-    target = samples_y.numpy()
-    valid = target[:, :, 3] > 0
-    feature_ids = target[:, :, 0].astype(np.int64)
-    results = {}
-
-    for feature_id in target_ids:
-        feature_id = int(feature_id)
-        signal_mask = valid & (feature_ids == feature_id)
-        n_observations = int(signal_mask.sum())
-        result = {
-            "unit": TARGET_UNITS.get(variable_names[feature_id]),
-            "n_observations": n_observations,
+def mse_by_signal(generation, samples_y, variable_names, target_ids, means, stds,
+                  reference_scales=None, info=None):
+    """Compute mean-forecast MSE by signal, preserving clinical units."""
+    detailed = calculate_predictive_metrics(
+        generation, samples_y, variable_names, target_ids, means, stds,
+        reference_scales=reference_scales, info=info,
+    )
+    return {
+        name: {
+            "unit": values["unit"],
+            "n_observations": values["n_observations"],
+            "MSE_mean": values["metrics"].get("MSE_mean", {}),
         }
-
-        if n_observations:
-            draws = gen[signal_mask]
-            actual_standardized = target[:, :, 2][signal_mask]
-            predictions = {
-                "median": np.median(draws, axis=-1),
-                "mean": np.mean(draws, axis=-1),
-            }
-            scale = stds[feature_id] if stds[feature_id] != 0 else 1.0
-            actual = actual_standardized * scale + means[feature_id]
-            result["MSE_standardized"] = {
-                name: float(np.mean((prediction - actual_standardized) ** 2))
-                for name, prediction in predictions.items()
-            }
-            result["MSE_original_units"] = {
-                name: float(np.mean(((prediction * scale + means[feature_id]) - actual) ** 2))
-                for name, prediction in predictions.items()
-            }
-        else:
-            result["MSE_standardized"] = {"median": None, "mean": None}
-            result["MSE_original_units"] = {"median": None, "mean": None}
-
-        results[variable_names[feature_id]] = result
-
-    return results
+        for name, values in detailed["by_signal"].items()
+    }
 
 
 def save_predictions_csv(rows, path):
@@ -160,7 +144,11 @@ def save_predictions_csv(rows, path):
 
 def plot_example(sample_index, generation, samples_y, samples_x, info, variable_names,
                  target_ids, means, stds, output_path):
+    extracted = extract_targets(samples_y[sample_index:sample_index + 1])
     gen, target, history = generation[sample_index].numpy(), samples_y[sample_index].numpy(), samples_x[sample_index].numpy()
+    valid_targets = extracted.mask[0].numpy()
+    target_values = extracted.values[0].numpy()
+    target_features = extracted.feature_ids[0].numpy()
     sample_id = int(info[sample_index, 0])
     fig, axes = plt.subplots(
         len(target_ids), 1, figsize=(10, max(9, 2.7 * len(target_ids))),
@@ -178,10 +166,10 @@ def plot_example(sample_index, generation, samples_y, samples_x, info, variable_
                 s=22, color="#2878b5", label="Real observado", zorder=4,
             )
 
-        positions = np.flatnonzero((target[3] > 0) & (target[0].astype(np.int64) == feature_id))
+        positions = np.flatnonzero(valid_targets & (target_features == feature_id))
         if len(positions):
             times = target[1, positions]
-            actual = unscale(target[2, positions], feature_id, means, stds)
+            actual = unscale(target_values[positions], feature_id, means, stds)
             draws = np.asarray([unscale(gen[position], feature_id, means, stds) for position in positions])
             parts = ax.violinplot(
                 [draws[i] for i in range(len(positions))], positions=times, widths=0.8,
@@ -276,6 +264,17 @@ def main():
         variable_names, target_ids = pickle.load(file)
     with Path("preprocess/data/mean_std.pkl").open("rb") as file:
         means, stds = pickle.load(file)
+    reference_path = Path("preprocess/data/evaluation_reference_scale.pkl")
+    if not reference_path.is_file():
+        raise FileNotFoundError(
+            "Frozen evaluation scales are missing. Run preprocessing step_4.py once to create "
+            "preprocess/data/evaluation_reference_scale.pkl; keep that file unchanged when updating the normalizer."
+        )
+    with reference_path.open("rb") as file:
+        reference = pickle.load(file)
+    if reference.get("variable_names") != list(variable_names) or not np.array_equal(reference.get("target_ids"), target_ids):
+        raise ValueError("Frozen evaluation scales do not match var.pkl")
+    reference_scales = np.asarray(reference["scales"], dtype=float)
 
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else checkpoint.parent / f"inference_n{args.nsample}_seed{args.seed}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -294,7 +293,11 @@ def main():
         model, test_loader, args.nsample, seed=args.seed
     )
 
-    sacrps, mse = calc_metrics(1, generation, samples_y)
+    NACRPS, _ = calc_metrics(1, generation, samples_y)
+    predictive_metrics = calculate_predictive_metrics(
+        generation, samples_y, variable_names, target_ids, means, stds,
+        reference_scales=reference_scales, info=info,
+    )
     metrics = {
         "checkpoint": str(checkpoint),
         "device": device,
@@ -302,11 +305,24 @@ def main():
         "seed": args.seed,
         "data_seed": args.data_seed,
         "test_samples": int(generation.shape[0]),
-        "SACRPS": float(sacrps),
-        "MSE": float(mse.item() if torch.is_tensor(mse) else mse),
-        "MSE_by_signal": mse_by_signal(
-            generation, samples_y, variable_names, target_ids, means, stds
+        "NACRPS": float(NACRPS),
+        "NACRPS_statistics": legacy_nacrps_statistics(1, generation, samples_y),
+        "NACRPS_definition": (
+            "Legacy quantile score: mean over q=.05..95 step .05, normalized by "
+            "sum(abs(valid standardized targets)); not directly comparable across tasks/cohorts."
         ),
+        "evaluation_reference_scale": {
+            key: reference.get(key) for key in ("version", "seed", "source")
+        },
+        "MSE_by_signal": {
+            name: {
+                "unit": values["unit"],
+                "n_observations": values["n_observations"],
+                "MSE_mean": values["metrics"].get("MSE_mean", {}),
+            }
+            for name, values in predictive_metrics["by_signal"].items()
+        },
+        "predictive_metrics": predictive_metrics,
     }
     with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2, ensure_ascii=False)
