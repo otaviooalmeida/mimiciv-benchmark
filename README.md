@@ -12,32 +12,62 @@ https://physionet.org/content/mimiciv/3.1/
 [Pytorch=2.1.1 + cuda=11.8](https://pytorch.org/)
 
 # Data preprocessing
-Create empty folders `/save`, `/preprocess/data`, and `/preprocess/data/first`.
 Place the MIMIC-IV release under `/preprocess/MIMICIV` with its `icu/` and `hosp/` files.
-From `/preprocess`, run steps 1–4 in order (set the release label on step 1):
+For the audited clinical-event dataset, install the Parquet dependencies and build from
+chunks (run from `/preprocess`):
 
 ```bash
-MIMIC_DATA_VERSION=3.1 python step_1.py
-python step_2.py
-python step_3.py
+pip install -r requirements-events.txt
+MIMIC_DATA_VERSION=3.1 python build_event_dataset.py --mimic-root MIMICIV --output-dir data
+```
+
+This writes local, ID-bearing Parquet event/cohort files, minute/source aggregates, an
+ID-free cohort-flow JSON, a variable/source summary and a stratified extreme-value review
+sample. Do not commit generated data. This audit build is separate from the forecast
+preprocessing below; it is not silently substituted for the legacy forecast protocol.
+
+The legacy forecast preprocessing is also chunked and disk-backed. From `preprocess/`:
+
+```bash
+pip install -r requirements-events.txt
+python step_1.py --chunksize 250000
+python step_2.py --chunksize 250000 --staging-buckets 64 \
+  --max-staging-bucket-rows 2000000 --max-stay-rows 2000000
+python step_3.py --workers 1
 python step_4.py --seed 2026
 ```
 
+Step 1 writes mapped rows incrementally; step 2 writes complete-stay Parquet partitions;
+step 3 sends file paths (not DataFrames) to spawn-safe workers; step 4 fits train-only
+statistics online and writes sharded data consumed lazily by `dataset.py`. Step 2 stages into a fixed number of hash buckets to avoid a file per stay per input
+chunk. Its stay and staging-bucket row limits are safety guards, not external spill:
+if either trips, stop and investigate rather than raising limits blindly. Start with one step-3
+worker, then increase only after measuring process-tree memory on the authorized machine.
+The audit Parquet builder remains the path that writes the raw-provenance event table and
+clinical audit report.
+
 # Auditable events and causal availability
 
-Preprocessing step 1 writes `preprocess/data/clinical_events.csv` and
-`clinical_event_audit.json`, preserving IDs, source dictionaries, raw values/units,
-measurement and availability times, and inputevent rate/amount/order/status metadata.
-The item IDs follow the existing feature mappings; MIT-LCP SQL is pinned to commit
-`303d26c623dcc9c49cc0f204468d4acc2f063797` as guidance, not universal clinical truth.
-Set `MIMIC_DATA_VERSION` before step 1 to record the exact release label. Details and
-limitations: [`docs/data/clinical-events.md`](docs/data/clinical-events.md).
+The chunked `build_event_dataset.py` writes `events.parquet/`, `cohort.parquet`,
+`minute_aggregates.parquet/`, `cohort_flow.json`, `variable_source_summary.parquet`, and
+`extreme_review_sample.parquet`. Coverage is limited to the existing validated benchmark
+item mappings (primary targets, named supporting variables, selected outputs, and mapped
+norepinephrine/vasopressin input events), not a full MIMIC table dump. It validates ICU temporal membership, uses half-open
+`[intime, outtime)` boundaries, links labs with missing `hadm_id` only when patient/time
+identifies one stay, and retains ambiguous/unattributable rows without duplicating them.
+Exact duplicates use a documented key and preserve counts/IDs; simultaneous repeats and
+cross-source discordance remain explicit. Details: [`docs/data/clinical-events.md`](docs/data/clinical-events.md).
 
-The target is now peripheral `SpO2_peripheral`; lab `SO2_bloodgas` remains separate.
-Step 2 excludes missing `storetime` by default and supports an explicit sensitivity run:
+Peripheral `SpO2_peripheral` and lab `SO2_bloodgas` remain distinct signals.
+The fixed primary minute statistic is the arithmetic mean per variable/source/unit; sources
+are never pooled, and min/max/last are auxiliary. No target winsorization is applied.
+Legacy step 1 also no longer applies its historical value-range filters to mapped values.
+The auditable Parquet path records reasons for invalid units and physically impossible
+values while retaining plausible extremes with review flags. Step 2 in the legacy pipeline
+excludes missing `storetime` by default and supports an explicit sensitivity run:
 `python step_2.py --missing-availability-policy measurement_time`. Step 3 also enforces
 measurement time before cutoff and availability at/before cutoff. Retrospectively expanded
-inputevent medication features are excluded until an as-of infusion state can be reconstructed.
+inputevent medication features are excluded until an as-of infusion state can be reconstructed. The legacy forecast shards are not yet built from the new source-specific Parquet aggregates.
 Regenerate preprocessing steps 1–4 after this target/protocol change. If the old frozen
 scale exists, archive `preprocess/data/evaluation_reference_scale.pkl` explicitly before
 step 4; step 4 refuses to silently reuse or overwrite a scale for the former mixed target.
@@ -98,9 +128,9 @@ results across different hardware/CUDA versions are not guaranteed.
 Evaluation writes `metrics_*.json`, `baseline_metrics.json`, batch-aligned forecast shards
 (`generation`, targets, history, and patient/sample metadata), and prediction/calibration
 plots. It does not concatenate the full test set on GPU. Reports identify the split,
-population and model/baseline source. `clinical_events.csv` preserves event provenance;
-the current forecast shards still use the legacy minute aggregation and do not carry a
-source ID for each model input/target.
+population and model/baseline source. The new `events.parquet` dataset preserves event
+provenance; legacy forecast shards still use the older minute aggregation and do not carry
+a source ID for each model input/target.
 
 Metrics include mean-based MSE, median-based MAE, empirical and fair ensemble CRPS,
 80%/95% coverage, width and interval score, plus upper/lower threshold-weighted CRPS.

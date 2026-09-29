@@ -36,6 +36,9 @@ EXTRA_COLUMNS = [
     "ordercategoryname", "secondaryordercategoryname", "ordercomponenttypedescription",
     "ordercategorydescription", "continueinnextdept", "cancelreason",
     "originalrateuom", "originalamountuom", "legacy_event_retained",
+    "hadm_id_raw", "stay_link_method", "stay_link_status", "candidate_stay_count",
+    "boundary_relation", "duplicate_count", "duplicate_event_ids", "duplicate_source_row_ids",
+    "measurement_relation", "simultaneous_measurement_count", "source_disagreement",
 ]
 EVENT_COLUMNS = CORE_COLUMNS + EXTRA_COLUMNS
 
@@ -101,11 +104,13 @@ def _unit_family(value):
     token = _unit_token(value)
     return {
         "percent": "%", "percentage": "%", "f": "degf", "fahrenheit": "degf",
-        "degreesf": "degf", "c": "degc", "celsius": "degc", "degreesc": "degc",
-        "pounds": "lb", "pound": "lb",
-        "lbs": "lb", "kilograms": "kg", "kilogram": "kg", "kgs": "kg",
-        "milligrams": "mg", "micrograms": "mcg", "milliliters": "ml",
-        "liters": "l", "mmhg": "mmhg",
+        "degreesf": "degf", "degreesfahrenheit": "degf", "c": "degc", "celsius": "degc",
+        "degreesc": "degc", "degreescelsius": "degc",
+        "pounds": "lb", "pound": "lb", "lbs": "lb", "kilograms": "kg",
+        "kilogram": "kg", "kgs": "kg", "milligrams": "mg", "milligram": "mg",
+        "micrograms": "mcg", "microgram": "mcg", "ug": "mcg", "μg": "mcg", "µg": "mcg",
+        "milliliters": "ml", "milliliter": "ml", "liters": "l", "liter": "l",
+        "beats/min": "bpm", "beats/minute": "bpm", "beat/min": "bpm", "mmhg": "mmhg",
     }.get(token, token)
 
 
@@ -169,7 +174,11 @@ def _normal_event_rows(raw, table, variable_map, d_items, d_labitems):
     data["variable"] = data["itemid"].map(variable_by_item)
     data["source"] = data["itemid"].map(source_by_item)
 
-    numeric = pd.to_numeric(data.get("value_numeric_raw"), errors="coerce")
+    numeric_source = data.get("value_numeric_raw")
+    if numeric_source is None:
+        numeric_source = data.get("value", pd.Series(None, index=data.index, dtype=object))
+    numeric = pd.to_numeric(numeric_source, errors="coerce")
+    data["value_numeric_raw"] = numeric
     raw_unit = data.get("valueuom", pd.Series(None, index=data.index, dtype=object))
     unit_token = raw_unit.map(_unit_token)
     dictionary_unit = data.get("unitname", pd.Series(None, index=data.index, dtype=object))
@@ -225,26 +234,86 @@ def _normal_event_rows(raw, table, variable_map, d_items, d_labitems):
         unit.loc[unknown_mask] = None
         rule.loc[unknown_mask] = unknown_rule
         issue.loc[unknown_mask] = reason
+    raw_text = data.get("value", pd.Series(None, index=data.index, dtype=object)).astype("string").str.strip().str.casefold()
+    categorical_values = {
+        "CRR": {
+            "normal <3 seconds": 0.0, "normal <3 secs": 0.0,
+            "abnormal >3 seconds": 1.0, "abnormal >3 secs": 1.0,
+        },
+        "Intubated": {"intubated": 1.0, "not intubated": 0.0},
+    }
+    for variable, values in categorical_values.items():
+        variable_rows = data["variable"].eq(variable)
+        selected = variable_rows & raw_text.isin(values)
+        normalized.loc[selected] = raw_text.loc[selected].map(values)
+        unit.loc[selected] = "binary"
+        rule.loc[selected] = variable.lower() + "-categorical-to-binary-v1"
+        unrecognized = variable_rows & raw_text.notna() & ~raw_text.isin(values)
+        issue.loc[unrecognized & issue.isna()] = "categorical_value_unrecognized"
+
+    raw_unit_missing = numeric.notna() & raw_unit.isna()
+    normalized.loc[raw_unit_missing] = np.nan
+    issue.loc[raw_unit_missing] = issue.loc[raw_unit_missing].map(
+        lambda reason: "{};raw_unit_missing".format(reason)
+        if not _is_missing(reason) else "raw_unit_missing"
+    )
     dictionary_conversion_mismatch = dictionary_mismatch & data["variable"].isin(conversion_specs)
     issue.loc[dictionary_conversion_mismatch] = issue.loc[dictionary_conversion_mismatch].map(
         lambda reason: "{};dictionary_unit_disagreement".format(reason)
         if not _is_missing(reason) else "dictionary_unit_disagreement"
     )
+    normalized.loc[dictionary_mismatch] = np.nan
+    issue.loc[dictionary_mismatch & issue.isna()] = "dictionary_unit_disagreement"
+    nonfinite = numeric.notna() & ~np.isfinite(numeric)
+    normalized.loc[nonfinite] = np.nan
+    issue.loc[nonfinite] = "non_finite_numeric_value"
+    impossible_ranges = {
+        "SpO2_peripheral": (0.0, 100.0), "SO2_bloodgas": (0.0, 100.0),
+        "FiO2": (0.0, 1.0), "Weight": (0.0, None), "Height": (0.0, None),
+        "HR": (0.0, None), "RR": (0.0, None), "SBP": (0.0, None),
+        "DBP": (0.0, None), "MBP": (0.0, None),
+    }
+    impossible = pd.Series(False, index=data.index)
+    for variable, (lower, upper) in impossible_ranges.items():
+        selected = data["variable"].eq(variable) & numeric.notna()
+        if lower is not None:
+            impossible |= selected & normalized.astype(float).lt(lower)
+        if upper is not None:
+            impossible |= selected & normalized.astype(float).gt(upper)
+    normalized_numeric = pd.to_numeric(normalized, errors="coerce")
+    impossible |= data["variable"].eq("Temperature") & normalized_numeric.lt(-273.15)
+    normalized.loc[impossible] = np.nan
+    issue.loc[impossible] = "physically_impossible_value"
+    normalized_numeric = pd.to_numeric(normalized, errors="coerce")
+    review_ranges = {
+        "Temperature": (30.0, 43.0), "HR": (30.0, 220.0), "RR": (1.0, 60.0),
+        "SBP": (60.0, 250.0), "DBP": (30.0, 150.0), "SpO2_peripheral": (70.0, 100.0),
+    }
+    review_extreme = pd.Series(False, index=data.index)
+    for variable, (lower, upper) in review_ranges.items():
+        selected = data["variable"].eq(variable) & normalized_numeric.notna()
+        review_extreme |= selected & ((normalized_numeric < lower) | (normalized_numeric > upper))
 
     raw_value = data.get("value", pd.Series(None, index=data.index, dtype=object)).where(
         data.get("value", pd.Series(None, index=data.index, dtype=object)).notna(),
         data.get("value_numeric_raw"),
     )
-    normalized.loc[numeric.isna()] = data.get("value", pd.Series(None, index=data.index, dtype=object)).loc[numeric.isna()]
     measured = pd.to_datetime(data.get("charttime"), errors="coerce")
     available = pd.to_datetime(data.get("storetime"), errors="coerce")
+    availability_precedes_measurement = available.notna() & measured.notna() & (available < measured)
+    normalized.loc[availability_precedes_measurement] = np.nan
+    issue.loc[availability_precedes_measurement] = "availability_precedes_measurement"
     flags = pd.Series("", index=data.index, dtype=object)
     for mask, flag in (
         (available.isna(), "availability_missing"),
         (measured.isna(), "measurement_time_missing"),
         (raw_unit.isna(), "unit_missing"),
-        (available.notna() & measured.notna() & (available < measured), "available_before_measurement_time"),
-        (issue.notna(), "unit_unverified"),
+        (availability_precedes_measurement, "available_before_measurement_time"),
+        (issue.str.contains("unit", na=False), "unit_unverified"),
+        (issue.eq("physically_impossible_value"), "physically_impossible_value"),
+        (issue.eq("non_finite_numeric_value"), "non_finite_numeric_value"),
+        (issue.eq("categorical_value_unrecognized"), "categorical_value_unrecognized"),
+        (review_extreme, "extreme_value_review"),
         (data["variable"].eq("ambiguous_item_mapping"), "ambiguous_item_mapping"),
     ):
         flags.loc[mask] = flags.loc[mask].map(lambda old: _flags(old, flag) or "")
@@ -281,7 +350,7 @@ def _normal_event_rows(raw, table, variable_map, d_items, d_labitems):
     result["table"] = table
     result["itemid"] = data["itemid"]
     result["variable"] = data["variable"]
-    result["value_raw"] = raw_value
+    result["value_raw"] = raw_value.astype("string")
     result["unit_raw"] = raw_unit
     result["value"] = normalized
     result["unit"] = unit
@@ -304,6 +373,9 @@ def _normal_event_rows(raw, table, variable_map, d_items, d_labitems):
     result["variable_candidates"] = data["itemid"].map(
         lambda itemid: ";".join(sorted(names_by_item.get(itemid, set())))
     )
+    result["hadm_id_raw"] = data.get("hadm_id")
+    for column in ("stay_link_method", "stay_link_status", "candidate_stay_count", "boundary_relation"):
+        result[column] = data.get(column)
     return result.reindex(columns=EVENT_COLUMNS).reset_index(drop=True)
 
 
@@ -409,9 +481,10 @@ def build_input_event_rows(inputevents, legacy_events, d_items, d_labitems):
     raw_value = data["rate"].where(use_rate, data["amount"])
     raw_unit = data["rateuom"].where(use_rate, data["amountuom"])
     unit_disagreement = (
-        raw_unit.notna() & data["unitname"].notna()
+        ~use_rate & raw_unit.notna() & data["unitname"].notna()
         & raw_unit.map(_unit_family).ne(data["unitname"].map(_unit_family))
     )
+    availability_precedes_start = data["storetime"].notna() & data["starttime"].notna() & (data["storetime"] < data["starttime"])
     ambiguous = data["variable"].eq("ambiguous_item_mapping")
     flags = pd.Series("", index=data.index, dtype=object)
     flag_masks = (
@@ -420,6 +493,7 @@ def build_input_event_rows(inputevents, legacy_events, d_items, d_labitems):
         (raw_value.isna(), "value_missing"),
         (raw_unit.isna(), "unit_missing"),
         (unit_disagreement, "dictionary_unit_disagreement"),
+        (availability_precedes_start, "available_before_measurement_time"),
         (ambiguous, "ambiguous_item_mapping"),
         (pd.Series(True, index=data.index), "infusion_state_not_reconstructed"),
     )
@@ -432,19 +506,30 @@ def build_input_event_rows(inputevents, legacy_events, d_items, d_labitems):
     result["table"] = "inputevents"
     result["itemid"] = data["itemid"].astype(int)
     result["variable"] = data["variable"]
-    result["value_raw"] = raw_value
+    result["value_raw"] = raw_value.astype("string")
     result["unit_raw"] = raw_unit
-    result["value"] = raw_value
+    numeric_raw = pd.to_numeric(raw_value, errors="coerce")
+    invalid_numeric = numeric_raw.notna() & ~np.isfinite(numeric_raw)
+    missing_unit = raw_unit.isna() & numeric_raw.notna()
+    invalid_value = availability_precedes_start | unit_disagreement | invalid_numeric | missing_unit
+    result["value"] = numeric_raw.mask(invalid_value)
     result["unit"] = raw_unit
-    result["measurement_time"] = data["starttime"]
-    result["available_time"] = data["storetime"]
+    result["measurement_time"] = pd.to_datetime(data["starttime"], errors="coerce")
+    result["available_time"] = pd.to_datetime(data["storetime"], errors="coerce")
     result["source"] = np.where(use_rate, "inputevents_rate", "inputevents_amount")
     result["quality_flag"] = flags.replace("", None)
     result["exclusion_reason"] = "inputevent_type_and_asof_state_not_audited"
+    result.loc[availability_precedes_start, "exclusion_reason"] += ";availability_precedes_measurement"
+    result.loc[unit_disagreement, "exclusion_reason"] += ";dictionary_unit_disagreement"
+    result.loc[missing_unit, "exclusion_reason"] += ";raw_unit_missing"
+    result.loc[invalid_numeric, "exclusion_reason"] += ";non_finite_numeric_value"
     result["legacy_event_retained"] = False
+    result["hadm_id_raw"] = data.get("hadm_id")
+    for column in ("stay_link_method", "stay_link_status", "candidate_stay_count", "boundary_relation"):
+        result[column] = data.get(column)
     result.loc[ambiguous, "exclusion_reason"] += ";ambiguous_legacy_item_mapping"
     result["conversion_rule_version"] = "identity-raw-inputevents-v1"
-    result["value_numeric_raw"] = raw_value
+    result["value_numeric_raw"] = numeric_raw
     for source, target in (
         ("item_label", "label"), ("item_category", "category"),
         ("dictionary_unitname", "unitname"), ("source_row_id", "source_row_id"),
@@ -466,6 +551,8 @@ def build_input_event_rows(inputevents, legacy_events, d_items, d_labitems):
         ("continueinnextdept", "continueinnextdept"),
     ):
         result[source] = data.get(target)
+    result["start_time"] = pd.to_datetime(data["starttime"], errors="coerce")
+    result["end_time"] = pd.to_datetime(data["endtime"], errors="coerce")
     return result.reindex(columns=EVENT_COLUMNS).reset_index(drop=True)
 
 

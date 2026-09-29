@@ -1,4 +1,6 @@
 import pickle
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
@@ -96,8 +98,88 @@ class MIMIC_Dataset(Dataset):
     def __len__(self):
         return len(self.use_index_list)
         
+class ShardedMIMICDataset(Dataset):
+    """Lazily load one compressed sample file and materialize only that batch row."""
+
+    def __init__(self, index_path, shard_root, size, target_var, seed=2026):
+        self.index = pd.read_csv(index_path)
+        self.shard_root = Path(shard_root)
+        self.size = int(size)
+        self.target_var = np.asarray(target_var, dtype=int)
+        self.seed = int(seed)
+        if not self.index.empty and not self.index["sample_file"].notna().all():
+            raise ValueError("Sharded sample index contains a missing sample_file")
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, index):
+        row = self.index.iloc[int(index)]
+        path = self.shard_root / str(row["sample_file"])
+        with np.load(path, allow_pickle=False) as sample:
+            raw = [
+                sample["vind"].astype(np.float64, copy=True),
+                sample["minute"].astype(np.float64, copy=True),
+                sample["value"].astype(np.float64, copy=True),
+                sample["mask"].astype(np.float64, copy=True),
+            ]
+        info = pd.DataFrame([{
+            "ts_ind": int(row["ts_ind"]), "sub_id": int(row["sub_id"]),
+            "x_len": int(row["x_len"]), "y_len": int(row["y_len"]),
+        }])
+        rng = np.random.default_rng(np.random.SeedSequence([self.seed, int(index)]))
+        samples_x, samples_y, sample_info = triplet_generate(
+            [raw], info, self.size, self.target_var, rng=rng,
+        )
+        sample_info = np.column_stack((
+            sample_info.drop(columns=["sub_id"]).to_numpy(),
+            sample_info["sub_id"].to_numpy(),
+        ))
+        return {
+            "samples_x": samples_x[0], "samples_y": samples_y[0],
+            "info": sample_info[0],
+        }
+
+
+def _sharded_dataloader(data_path, var_path, size, batch_size, seed, include_test, manifest):
+    data_path = Path(data_path)
+    shard_root = data_path.parent / manifest["root"]
+    variables, target_var = pickle.load(open(var_path, "rb"))
+    split_names = ("train", "val_model", "calibration")
+    datasets = {}
+    for offset, split in enumerate(split_names):
+        index_path = shard_root / manifest["splits"][split]
+        datasets[split] = ShardedMIMICDataset(
+            index_path, index_path.parent, size, target_var, seed=seed + offset,
+        )
+    test_dataset = None
+    if include_test:
+        index_path = shard_root / manifest["splits"]["test"]
+        test_dataset = ShardedMIMICDataset(
+            index_path, index_path.parent, size, target_var, seed=seed + 3,
+        )
+    loaders = [
+        DataLoader(datasets["train"], batch_size=batch_size, shuffle=True,
+                   generator=torch.Generator().manual_seed(seed)),
+        DataLoader(datasets["val_model"], batch_size=batch_size, shuffle=False,
+                   generator=torch.Generator().manual_seed(seed + 1)),
+        DataLoader(datasets["calibration"], batch_size=batch_size, shuffle=False,
+                   generator=torch.Generator().manual_seed(seed + 2)),
+        None if test_dataset is None else DataLoader(
+            test_dataset, batch_size=batch_size, shuffle=False,
+            generator=torch.Generator().manual_seed(seed + 3),
+        ),
+    ]
+    return tuple(loaders)
+
+
 def get_dataloader(data_path, var_path, size, batch_size=32, seed=2026, include_test=True):
-    prepared = pickle.load(open(data_path, 'rb'))
+    with open(data_path, 'rb') as prepared_file:
+        prepared = pickle.load(prepared_file)
+    if isinstance(prepared, dict) and prepared.get("format") == "mimiciv-sharded-v1":
+        return _sharded_dataloader(
+            data_path, var_path, size, batch_size, seed, include_test, prepared,
+        )
     if len(prepared) == 8:
         (train_set, train_info, val_set, val_info,
          calibration_set, calibration_info, test_set, test_info) = prepared
