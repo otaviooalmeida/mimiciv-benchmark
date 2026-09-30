@@ -7,11 +7,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+DEFAULT_CHUNKSIZE = 1_000_000
+MAX_CHUNKSIZE = 2_000_000
+
 try:
+    from .csv_stream import iter_csv_chunks
     from .clinical_event_table import _normal_event_rows, load_dictionaries
     from .event_dataset import _append_link_fields, build_adult_cohort, link_event_chunk
     from .legacy_mappings import build_legacy_item_map
 except ImportError:  # executed from preprocess/
+    from csv_stream import iter_csv_chunks
     from clinical_event_table import _normal_event_rows, load_dictionaries
     from event_dataset import _append_link_fields, build_adult_cohort, link_event_chunk
     from legacy_mappings import build_legacy_item_map
@@ -88,10 +93,12 @@ def _legacy_icu_frame(cohort):
     return result.drop(columns=["transfer_boundary_start"], errors="ignore")
 
 
-def build_legacy_step1(mimic_root, output_dir, chunksize=500_000):
+def build_legacy_step1(mimic_root, output_dir, chunksize=DEFAULT_CHUNKSIZE):
     """Stream mapped chart/lab/output events into the input contract for step 2."""
-    if chunksize <= 0:
-        raise ValueError("chunksize must be positive")
+    if not 0 < chunksize <= MAX_CHUNKSIZE:
+        raise ValueError(
+            "chunksize must be between 1 and {} rows".format(MAX_CHUNKSIZE)
+        )
     mimic_root, output_dir = Path(mimic_root), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     icustays = pd.read_csv(mimic_root / "icu" / "icustays.csv")
@@ -122,8 +129,9 @@ def build_legacy_step1(mimic_root, output_dir, chunksize=500_000):
     for source, columns in SOURCE_COLUMNS.items():
         csv_path = mimic_root / ("hosp" if source == "labevents" else "icu") / (source + ".csv")
         dtype = {"value": "string", "valueuom": "string"}
-        for chunk in pd.read_csv(
-            csv_path, usecols=columns, chunksize=chunksize, low_memory=False, dtype=dtype,
+        for chunk in iter_csv_chunks(
+            csv_path, columns, chunksize=chunksize, dtype=dtype,
+            optional_columns={"warning", "flag"}.intersection(columns),
         ):
             chunk["source_row_id"] = np.arange(
                 offsets[source], offsets[source] + len(chunk), dtype=np.int64

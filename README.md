@@ -30,12 +30,14 @@ The legacy forecast preprocessing is also chunked and disk-backed. From `preproc
 
 ```bash
 pip install -r requirements-events.txt
-python step_1.py --chunksize 250000
+python step_1.py --chunksize 1000000
 python step_2.py --chunksize 250000 --staging-buckets 64 \
   --max-staging-bucket-rows 2000000 --max-stay-rows 2000000
 python step_3.py --workers 1
 python step_4.py --seed 2026
 ```
+
+Step 1 reads at most 1,000,000 source rows per chunk by default (hard maximum: 2,000,000); use a smaller `--chunksize` if measurements show memory pressure. This is a row-count guard, not an absolute RSS guarantee, because CSV row widths vary.
 
 Step 1 writes mapped rows incrementally; step 2 writes complete-stay Parquet partitions;
 step 3 sends file paths (not DataFrames) to spawn-safe workers; step 4 fits train-only

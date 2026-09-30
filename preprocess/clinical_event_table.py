@@ -298,8 +298,12 @@ def _normal_event_rows(raw, table, variable_map, d_items, d_labitems):
         data.get("value", pd.Series(None, index=data.index, dtype=object)).notna(),
         data.get("value_numeric_raw"),
     )
-    measured = pd.to_datetime(data.get("charttime"), errors="coerce")
-    available = pd.to_datetime(data.get("storetime"), errors="coerce")
+    measured = pd.to_datetime(
+        data.get("charttime"), format="mixed", errors="coerce"
+    )
+    available = pd.to_datetime(
+        data.get("storetime"), format="mixed", errors="coerce"
+    )
     availability_precedes_measurement = available.notna() & measured.notna() & (available < measured)
     normalized.loc[availability_precedes_measurement] = np.nan
     issue.loc[availability_precedes_measurement] = "availability_precedes_measurement"
@@ -326,7 +330,9 @@ def _normal_event_rows(raw, table, variable_map, d_items, d_labitems):
         data.get("labevent_id", pd.Series(None, index=data.index)).notna(),
         table + ":" + source_row_id.astype(str),
     )
-    site_or_fluid = data.get("fluid", pd.Series(None, index=data.index, dtype=object))
+    site_or_fluid = data.get(
+        "fluid", pd.Series(None, index=data.index, dtype=object)
+    ).copy()
     site_rows = data["variable"].eq("Temperature Site")
     site_or_fluid.loc[site_rows] = raw_value.loc[site_rows]
     exclusion = issue.copy()
@@ -448,7 +454,10 @@ def build_chart_lab_events(chart, labs, legacy_events, icu, d_items, d_labitems)
         chart_rows.loc[ambiguous_site_match, "quality_flag"] = chart_rows.loc[
             ambiguous_site_match, "quality_flag"
         ].map(lambda flags: _flags(flags, "temperature_site_ambiguous"))
-    return pd.concat([chart_rows, lab_rows], ignore_index=True).reindex(columns=EVENT_COLUMNS)
+    nonempty_rows = [frame for frame in (chart_rows, lab_rows) if not frame.empty]
+    if not nonempty_rows:
+        return pd.DataFrame(columns=EVENT_COLUMNS)
+    return pd.concat(nonempty_rows, ignore_index=True).reindex(columns=EVENT_COLUMNS)
 
 
 def build_output_events(outputevents, legacy_events, d_items, d_labitems):

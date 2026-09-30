@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 try:
+    from .csv_stream import iter_csv_chunks
     from .clinical_event_table import (
         EVENT_COLUMNS,
         MIT_LCP_COMMIT,
@@ -18,6 +19,7 @@ try:
         build_input_event_rows,
     )
 except ImportError:  # executed as a script from preprocess/
+    from csv_stream import iter_csv_chunks
     from clinical_event_table import (
         EVENT_COLUMNS,
         MIT_LCP_COMMIT,
@@ -199,8 +201,14 @@ def _time_candidates(rows, cohort, time_column, interval=False):
         return {}, {}, pd.Series(dtype=object)
     left = rows.copy()
     left["__row"] = np.arange(len(left), dtype=np.int64)
-    left["__time"] = pd.to_datetime(left[time_column], errors="coerce") if not interval else pd.to_datetime(left["starttime"], errors="coerce")
-    left["__end"] = pd.to_datetime(left["endtime"], errors="coerce") if interval else pd.NaT
+    source_time = "starttime" if interval else time_column
+    left["__time"] = pd.to_datetime(
+        left[source_time], format="mixed", errors="coerce"
+    )
+    left["__end"] = (
+        pd.to_datetime(left["endtime"], format="mixed", errors="coerce")
+        if interval else pd.NaT
+    )
     right = cohort[["subject_id", "hadm_id", "stay_id", "intime", "outtime"]].rename(
         columns={"subject_id": "candidate_subject_id", "hadm_id": "candidate_hadm_id", "stay_id": "candidate_stay_id"}
     )
@@ -245,7 +253,9 @@ def link_event_chunk(raw, cohort, table):
     events["hadm_id_raw"] = events.get("hadm_id")
     source_stay = events.get("stay_id", pd.Series(np.nan, index=events.index))
     time_column = "starttime" if table == "inputevents" else "charttime"
-    measured = pd.to_datetime(events.get(time_column), errors="coerce")
+    measured = pd.to_datetime(
+        events.get(time_column), format="mixed", errors="coerce"
+    )
     events["stay_id"] = np.nan
     events["stay_link_method"] = None
     events["stay_link_status"] = "unattributable"
@@ -718,8 +728,9 @@ def build_event_dataset(mimic_root, output_dir, chunksize=250_000, max_partition
                 "totalamount": "string", "totalamountuom": "string", "statusdescription": "string",
             },
         }[source]
-        for chunk in pd.read_csv(
-            csv_path, usecols=columns, chunksize=chunksize, low_memory=False, dtype=raw_string_columns
+        for chunk in iter_csv_chunks(
+            csv_path, columns, chunksize=chunksize, dtype=raw_string_columns,
+            optional_columns={"warning", "flag"}.intersection(columns),
         ):
             chunk["source_row_id"] = np.arange(offsets[source], offsets[source] + len(chunk), dtype=np.int64)
             offsets[source] += len(chunk)
