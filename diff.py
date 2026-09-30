@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from attn import ResNet
+from evaluation import extract_targets
 
 class TDSTF(nn.Module):
     def __init__(self, config, device):
@@ -30,9 +31,14 @@ class TDSTF(nn.Module):
         samples_x, samples_y, info = self.process(batch)
         t = torch.randint(0, self.num_steps, [len(samples_x)]).to(self.device)
         current_alpha = self.alpha_torch[t]
-        noise = torch.randn((len(samples_x), size_y)).to(samples_y.device)
+        targets = extract_targets(samples_y)
+        if size_y != targets.values.shape[1]:
+            raise ValueError(f"size_y ({size_y}) must match target length ({targets.values.shape[1]})")
         mask_x = samples_x[:, 3]
-        mask_y = samples_y[:, 3]
+        mask_y = targets.mask
+        samples_y[:, 2] = targets.values
+        samples_y[:, 3] = mask_y.to(samples_y.dtype)
+        noise = torch.randn((len(samples_x), size_y), device=samples_y.device)
         samples_x[:, 0] = torch.where(mask_x == 1, samples_x[:, 0], self.lv)
         samples_x[:, 1] = torch.where(mask_x == 1, samples_x[:, 1], -1)
         samples_y[:, 0] = torch.where(mask_y == 1, samples_y[:, 0], self.lv)
@@ -40,18 +46,27 @@ class TDSTF(nn.Module):
         samples_y[:, 2] = ((current_alpha ** 0.5) * samples_y[:, 2] + ((1.0 - current_alpha) ** 0.5) * noise) * mask_y
         predicted = self.res_model(samples_x, samples_y, info, t)
         residual = torch.where(mask_y == 1, noise - predicted, 0)
-        loss = (residual ** 2).sum() / info[:, 2].sum()
+        loss = (residual ** 2).sum() / mask_y.sum().clamp_min(1)
 
         return loss
 
-    def forecast(self, samples_x, samples_y, info, n_samples):
+    def forecast(self, samples_x, samples_y, info, n_samples, generator=None):
         # Forecasting updates the noisy target in place at every diffusion step.
         # Preserve the caller's tensors so evaluate() can return the real target.
         samples_x = samples_x.clone()
         samples_y = samples_y.clone()
+        targets = extract_targets(samples_y)
+        samples_y[:, 2] = targets.values
+        samples_y[:, 3] = targets.mask.to(samples_y.dtype)
         generation = torch.zeros(n_samples, samples_y.shape[0], samples_y.shape[-1]).to(self.device)
         for i in range(n_samples):
-            samples_y[:, 2] = torch.randn_like(samples_y[:, 2]) * samples_y[:, 3]
+            initial_noise = torch.randn(
+                samples_y[:, 2].shape,
+                dtype=samples_y.dtype,
+                device=samples_y.device,
+                generator=generator,
+            )
+            samples_y[:, 2] = initial_noise * samples_y[:, 3]
             for t in range(self.num_steps - 1, -1, -1):
                 mask_x = samples_x[:, 3]
                 mask_y = samples_y[:, 3]
@@ -64,7 +79,12 @@ class TDSTF(nn.Module):
                 coeff2 = (1 - self.alpha_hat[t]) / (1 - self.alpha[t]) ** 0.5
                 samples_y[:, 2] = coeff1 * (samples_y[:, 2] - coeff2 * predicted) * samples_y[:, 3]
                 if t > 0:
-                    noise = torch.randn_like(samples_y[:, 2]) * samples_y[:, 3]
+                    noise = torch.randn(
+                        samples_y[:, 2].shape,
+                        dtype=samples_y.dtype,
+                        device=samples_y.device,
+                        generator=generator,
+                    ) * samples_y[:, 3]
                     sigma = ((1.0 - self.alpha[t - 1]) / (1.0 - self.alpha[t]) * self.beta[t]) ** 0.5
                     samples_y[:, 2] += sigma * noise
 
@@ -72,9 +92,9 @@ class TDSTF(nn.Module):
             
         return generation.permute(1, 2, 0)
 
-    def evaluate(self, batch, n_samples):
+    def evaluate(self, batch, n_samples, generator=None):
         samples_x, samples_y, info = self.process(batch)
         with torch.no_grad():
-            generation = self.forecast(samples_x, samples_y, info, n_samples)
+            generation = self.forecast(samples_x, samples_y, info, n_samples, generator=generator)
             
         return generation, samples_y, samples_x
