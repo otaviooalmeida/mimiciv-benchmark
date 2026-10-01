@@ -8,6 +8,14 @@ train:
   batch_size: 32 
   lr: 1.0e-3 
 
+evaluation:
+  tail_thresholds:
+    HR: {lower: 60, upper: 100}
+    SBP: {lower: 90, upper: 140}
+    DBP: {lower: 60, upper: 90}
+    Temperature: {lower: 36, upper: 38}
+    SpO2_peripheral: {lower: 90, upper: 100}
+
 diffusion:
   size: 60 
   layers: 3 
