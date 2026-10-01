@@ -4,7 +4,15 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-def triplet_generate(data, info, size, target_var, rng=None):
+INTERVENTION_NAMES = {
+    'Intubated', 'FiO2', 'Norepinephrine', 'Vasopressin', 'Dopamine', 'Epinephrine',
+    'Neosynephrine', 'Milrinone', 'Propofol', 'Midazolam', 'Fentanyl', 'Normal Saline',
+    'Lactated Ringers', 'Packed RBC', 'Fresh Frozen Plasma', 'Albumin 5%', 'Albumin 25%',
+    'OR/PACU Crystalloid',
+}
+
+
+def triplet_generate(data, info, size, target_var, rng=None, intervention_var=()):
     triplets_x = np.zeros((len(data), 4, size))
     triplets_y = np.zeros((len(data), 4, 10 * len(target_var)))
     
@@ -24,7 +32,22 @@ def triplet_generate(data, info, size, target_var, rng=None):
             out = False
             vs = None
             triplets_x[i, 3] = 1
-            ct = pd.DataFrame(np.zeros(len(target_var)).reshape((1, -1)), columns = list(target_var))
+            ct = pd.DataFrame(np.zeros(len(target_var)).reshape((1, -1)), columns=list(target_var))
+            recent = []
+            for v in target_var:
+                recent.extend(np.flatnonzero(data[i][0][:x_len] == v)[-3:])
+            for v in intervention_var:
+                recent.extend(np.flatnonzero(data[i][0][:x_len] == v)[-1:])
+            recent = np.unique(recent).astype(int)[-size:]
+            for j in recent:
+                for k in range(3):
+                    triplets_x[i, k, pos] = data[i][k][j]
+                if data[i][0][j] in target_var:
+                    ct[data[i][0][j]] += 1
+                pos += 1
+            for k in range(3):
+                data[i][k] = np.delete(data[i][k], recent)
+            x_len -= len(recent)
             while pos < size:
                 if out:
                     out = False
@@ -71,9 +94,12 @@ def triplet_generate(data, info, size, target_var, rng=None):
     return triplets_x, triplets_y, info
                     
 class MIMIC_Dataset(Dataset):
-    def __init__(self, data, info, size, target_var, use_index_list=None, seed=2026):
+    def __init__(self, data, info, size, target_var, use_index_list=None, seed=2026,
+                 intervention_var=()):
         rng = np.random.default_rng(seed)
-        self.samples_x, self.samples_y, self.info = triplet_generate(data, info, size, target_var, rng=rng)
+        self.samples_x, self.samples_y, self.info = triplet_generate(
+            data, info, size, target_var, rng=rng, intervention_var=intervention_var,
+        )
         self.info = np.array(self.info.drop(columns=['sub_id']))
         self.use_index_list = np.arange(len(self.samples_x))
     
@@ -93,9 +119,16 @@ class MIMIC_Dataset(Dataset):
 def get_dataloader(data_path, var_path, size, batch_size=32, seed=2026):
     train_set, train_info, valid_set, valid_info, test_set, test_info = pickle.load(open(data_path, 'rb'))
     var, target_var = pickle.load(open(var_path, 'rb'))
-    train_data = MIMIC_Dataset(train_set, train_info, size, target_var, seed=seed)
-    valid_data = MIMIC_Dataset(valid_set, valid_info, size, target_var, seed=seed + 1)
-    test_data = MIMIC_Dataset(test_set, test_info, size, target_var, seed=seed + 2)
+    intervention_var = [i for i, name in enumerate(var) if name in INTERVENTION_NAMES]
+    train_data = MIMIC_Dataset(
+        train_set, train_info, size, target_var, seed=seed, intervention_var=intervention_var,
+    )
+    valid_data = MIMIC_Dataset(
+        valid_set, valid_info, size, target_var, seed=seed + 1, intervention_var=intervention_var,
+    )
+    test_data = MIMIC_Dataset(
+        test_set, test_info, size, target_var, seed=seed + 2, intervention_var=intervention_var,
+    )
 
     train_generator = torch.Generator().manual_seed(seed)
     valid_generator = torch.Generator().manual_seed(seed + 1)
