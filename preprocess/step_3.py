@@ -11,6 +11,7 @@ def sample(data, thread):
         t = 0
         icu_data = data.loc[data.ts_ind==i]
         max_t = icu_data.minute.max()
+        windows = []
         while (t + 40) < max_t:
             y = icu_data.loc[(icu_data.minute>=(t+30))&(icu_data.minute<(t+40))&(icu_data.vind.isin(target_var))]
             pick = False
@@ -39,9 +40,13 @@ def sample(data, thread):
                     mask = np.ones(lx + ly)
                     ymask = np.copy(mask)
                     ymask[: lx] = 0
-                    samples.append([np.array(vind), np.array(minute), np.array(value), ymask])
-                    info.append([x.index[0], icu_data.iloc[0].sub_id, lx, ly])
+                    windows.append(([np.array(vind), np.array(minute), np.array(value), ymask],
+                                    [x.index[0], icu_data.iloc[0].sub_id, lx, ly]))
             t += 10
+        if windows:
+            selected = np.linspace(0, len(windows) - 1, min(5, len(windows)), dtype=int)
+            samples.extend(windows[j][0] for j in selected)
+            info.extend(windows[j][1] for j in selected)
     pickle.dump([samples, info], open('data/first/samples_{}.pkl'.format(thread+1),'wb'))
     print('Thread_{} finished'.format(thread))
 
