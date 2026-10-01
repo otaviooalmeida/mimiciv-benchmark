@@ -41,7 +41,6 @@ def sample(data, thread):
                     ymask[: lx] = 0
                     samples.append([np.array(vind), np.array(minute), np.array(value), ymask])
                     info.append([x.index[0], icu_data.iloc[0].sub_id, lx, ly])
-                    break
             t += 10
     pickle.dump([samples, info], open('data/first/samples_{}.pkl'.format(thread+1),'wb'))
     print('Thread_{} finished'.format(thread))
