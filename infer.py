@@ -111,8 +111,8 @@ def mse_by_signal(generation, samples_y, variable_names, target_ids, means, stds
     """Compute point-forecast MSE per target, in normalized and clinical units."""
     gen = generation.numpy()
     target = samples_y.numpy()
-    valid = target[:, :, 3] > 0
-    feature_ids = target[:, :, 0].astype(np.int64)
+    valid = target[:, 3, :] > 0
+    feature_ids = target[:, 0, :].astype(np.int64)
     results = {}
 
     for feature_id in target_ids:
@@ -126,7 +126,7 @@ def mse_by_signal(generation, samples_y, variable_names, target_ids, means, stds
 
         if n_observations:
             draws = gen[signal_mask]
-            actual_standardized = target[:, :, 2][signal_mask]
+            actual_standardized = target[:, 2, :][signal_mask]
             predictions = {
                 "median": np.median(draws, axis=-1),
                 "mean": np.mean(draws, axis=-1),
