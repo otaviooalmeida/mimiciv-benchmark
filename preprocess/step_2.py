@@ -5,7 +5,7 @@ import pickle
 pd.set_option('mode.chained_assignment', None)
 
 # Read extracted time series data.
-events = pd.read_csv('data/mimic_iv_events.csv', low_memory = False, usecols=['HADM_ID', 'ICUSTAY_ID', 'CHARTTIME', 'VALUENUM', 'TABLE', 'NAME'])
+events = pd.read_csv('data/mimic_iv_events.csv', low_memory = False, usecols=['HADM_ID', 'ICUSTAY_ID', 'CHARTTIME', 'VALUENUM', 'TABLE', 'NAME', 'VALUEUOM'])
 icu = pd.read_csv('data/mimic_iv_icu.csv')
 # Convert times to type datetime.
 events.CHARTTIME = pd.to_datetime(events.CHARTTIME)
@@ -52,6 +52,12 @@ events['ts_ind'] = events.ICUSTAY_ID.map(icustay_to_ind)
 
 # Rename some columns.
 events.rename(columns={'rel_charttime':'minute', 'NAME':'variable', 'VALUENUM':'value'}, inplace=True)
+target_names = [
+    'HR', 'SBP (Arterial)', 'SBP (Non-Invasive)', 'DBP (Arterial)',
+    'DBP (Non-Invasive)', 'Temperature', 'O2 Saturation (Pulse Oximetry)',
+    'O2 Saturation (Arterial)',
+]
+events.loc[events.variable.isin(target_names)].groupby(['variable', 'VALUEUOM']).value.agg(['count', 'min', 'max']).to_csv('data/target_value_audit.csv')
 
 # Add gender and age.
 icu['ts_ind'] = icu.ICUSTAY_ID.map(icustay_to_ind)
@@ -92,8 +98,7 @@ def inv_list(l):
     return d
 var_to_ind = inv_list(var)
 
-# target variables: keep the original vital signs and add Temperature and O2 Saturation (SpO2).
-target_names = ['HR', 'SBP', 'DBP', 'Temperature', 'O2 Saturation']
+# Predict source-separated vital signs with per-source minute means.
 missing_targets = [name for name in target_names if name not in var_to_ind]
 if missing_targets:
     raise ValueError('Target variables missing from extracted events: {}'.format(missing_targets))

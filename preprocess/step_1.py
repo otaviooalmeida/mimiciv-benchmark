@@ -52,11 +52,13 @@ la['TABLE'] = 'lab'
 dbp = [8368, 220051, 225310, 8555, 8441, 220180, 8502, 8440, 8503, 8504, 8507, 8506, 224643, 227242]
 sbp = [51, 220050, 225309, 6701, 455, 220179, 3313, 3315, 442, 3317, 3323, 3321, 224167, 227243]
 mbp = [52, 220052, 225312, 224, 6702, 224322, 456, 220181, 3312, 3314, 3316, 3322, 3320, 443]
+arterial_bp = [51, 52, 6701, 6702, 8368, 8555, 220050, 220051, 220052, 225309, 225310, 225312, 224322]
 ch_bp = ch.loc[ch.ITEMID.isin(dbp+sbp+mbp)]
 ch_bp = ch_bp.loc[(ch_bp.VALUENUM>=0)&(ch_bp.VALUENUM<=375)]
 ch_bp.loc[ch_bp.ITEMID.isin(dbp), 'NAME'] = 'DBP'
 ch_bp.loc[ch_bp.ITEMID.isin(sbp), 'NAME'] = 'SBP'
 ch_bp.loc[ch_bp.ITEMID.isin(mbp), 'NAME'] = 'MBP'
+ch_bp['NAME'] += np.where(ch_bp.ITEMID.isin(arterial_bp), ' (Arterial)', ' (Non-Invasive)')
 ch_bp['VALUEUOM'] = 'mmHg'
 ch_bp['VALUE'] = None
 events = ch_bp.copy()
@@ -217,7 +219,8 @@ events = pd.concat([events, la_itb])
 del la_itb
 
 # Extract multiple events. Remove outliers.
-o2sat = [834, 50817, 8498, 220227, 646, 220277]
+o2sat_pulseox = [646, 220277]
+o2sat_arterial = [834, 50817, 8498, 220227]
 sod = [50983, 50824]
 pot = [50971, 50822]
 mg = [50960]
@@ -262,7 +265,8 @@ rdw = [51277]
 plt = [51265]
 rbc = [51279]
 
-features = {'O2 Saturation': [o2sat, [0,100], '%'],
+features = {'O2 Saturation (Pulse Oximetry)': [o2sat_pulseox, [0,100], '%'],
+            'O2 Saturation (Arterial)': [o2sat_arterial, [0,100], '%'],
             'Sodium': [sod, [0,250], 'mEq/L'], 
             'Potassium': [pot, [0,15], 'mEq/L'], 
             'Magnesium': [mg, [0,22], 'mg/dL'], 
