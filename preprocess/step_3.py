@@ -44,7 +44,7 @@ def sample(data, thread):
                                     [x.index[0], icu_data.iloc[0].sub_id, lx, ly]))
             t += 10
         if windows:
-            selected = np.linspace(0, len(windows) - 1, min(5, len(windows)), dtype=int)
+            selected = np.linspace(0, len(windows) - 1, min(8, len(windows)), dtype=int)
             samples.extend(windows[j][0] for j in selected)
             info.extend(windows[j][1] for j in selected)
     pickle.dump([samples, info], open('data/first/samples_{}.pkl'.format(thread+1),'wb'))
