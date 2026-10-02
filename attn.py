@@ -75,16 +75,17 @@ class ResNet(nn.Module):
     def forward(self, samples_x, samples_y, info, diffusion_step):
         diffusion_emb = self.diffusion_embedding(diffusion_step)
         diffusion_emb = self.diffusion_projection(diffusion_emb)
-        diffusion_emb = diffusion_emb.unsqueeze(1).expand(diffusion_emb.shape[0], self.size_x, diffusion_emb.shape[1])
+        diffusion_emb_x = diffusion_emb.unsqueeze(1).expand(-1, self.size_x, -1)
+        diffusion_emb_y = diffusion_emb.unsqueeze(1).expand(-1, self.size_y, -1)
         triplets_x = (self.emb_f(samples_x[:, 0].to(torch.int64))
                     + self.emb_t(samples_x[:, 1].to(torch.int64))
                     + self.emb_v(samples_x[:, 2].unsqueeze(-1))
-                    + diffusion_emb) * samples_x[:, 3].unsqueeze(-1)
+                    + diffusion_emb_x) * samples_x[:, 3].unsqueeze(-1)
         triplets_y = (self.emb_f(samples_y[:, 0].to(torch.int64))
                     + self.emb_t(samples_y[:, 1].to(torch.int64))
                     + self.emb_v(samples_y[:, 2].unsqueeze(-1))
                     ) * samples_y[:, 3].unsqueeze(-1)
-        diffussion_emb_y = diffusion_emb[:, : self.size_y] * samples_y[:, 3].unsqueeze(-1)
+        diffussion_emb_y = diffusion_emb_y * samples_y[:, 3].unsqueeze(-1)
         skip = []
         for layer in self.residual_layers:
             triplets_y = triplets_y + diffussion_emb_y
