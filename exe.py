@@ -14,6 +14,7 @@ def train(
     valid_epoch_interval=10,
     foldername='',
     seed=2026,
+    abrupt_weighting=False,
 ):
     seed_everything(seed)
     optimizer = Adam(model.parameters(), lr=config['train']['lr'], weight_decay=5e-8)
@@ -35,7 +36,10 @@ def train(
         with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, train_batch in enumerate(it, start=1):
                 optimizer.zero_grad()
-                loss = model(train_batch, config['diffusion']['size'], size_y)
+                loss = model(
+                    train_batch, config['diffusion']['size'], size_y,
+                    abrupt_weighting=abrupt_weighting,
+                )
                 loss.backward()
                 avg_loss += loss.item()
                 optimizer.step()
@@ -52,7 +56,7 @@ def train(
         if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
             CRPS_valid, _ = evaluate(
-                0, model, valid_loader, nsample=5, foldername=foldername, seed=seed + 1
+                0, model, valid_loader, nsample=50, foldername=foldername, seed=seed + 1
             )
             print('{} (best)'.format(round(best_valid_loss, 4)))
             print('{} (current)'.format(round(CRPS_valid, 4)))
@@ -71,6 +75,34 @@ def train(
 
     if valid_loader is not None and best_valid_loss < np.inf:
         model.load_state_dict(torch.load(output_path))
+        evaluate(0, model, valid_loader, nsample=50, foldername=foldername, seed=seed + 1)
+
+def calc_validation_metrics(all_generation, all_samples_y, all_info):
+    target = all_samples_y[:, 2]
+    mask = all_samples_y[:, 3].bool()
+    sorted_generation = all_generation.sort(dim=-1).values
+    n_samples = all_generation.shape[-1]
+    coefficients = 2 * torch.arange(1, n_samples + 1, device=all_generation.device) - n_samples - 1
+    pairwise_term = (sorted_generation * coefficients).sum(dim=-1) / n_samples ** 2
+    point_crps = (all_generation - target.unsqueeze(-1)).abs().mean(dim=-1) - pairwise_term
+    abrupt = all_info[:, -1].to(all_generation.device).bool() if all_info.shape[1] >= 4 else torch.zeros(
+        len(all_generation), dtype=torch.bool, device=all_generation.device
+    )
+
+    def mean_for(windows):
+        selected = mask & windows.unsqueeze(1)
+        return point_crps[selected].mean().item() if selected.any() else float('nan')
+
+    lower = torch.quantile(all_generation, 0.025, dim=-1)
+    upper = torch.quantile(all_generation, 0.975, dim=-1)
+    coverage = (((target >= lower) & (target <= upper)) & mask).sum() / mask.sum()
+    return {
+        'overall_crps': mean_for(torch.ones_like(abrupt)),
+        'abrupt_crps': mean_for(abrupt),
+        'normal_crps': mean_for(~abrupt),
+        'coverage_95': coverage.item(),
+    }
+
 
 def calc_metrics(is_test, all_generation, all_samples_y):
     MSE = None
@@ -109,6 +141,7 @@ def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026)
         all_samples_x = []
         all_samples_y = []
         all_generation = []
+        all_info = []
         with tqdm(data_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, batch in enumerate(it, start=1):
                 # ground truth values will be replaced with pure noise before generation
@@ -117,11 +150,24 @@ def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026)
                 all_generation.append(generation)
                 all_samples_x.append(samples_x)
                 all_samples_y.append(samples_y)
+                if not is_test:
+                    all_info.append(batch['info'])
             
             all_generation = torch.cat(all_generation)
             all_samples_x = torch.cat(all_samples_x)
             all_samples_y = torch.cat(all_samples_y)
-            CRPS, MSE = calc_metrics(is_test, all_generation, all_samples_y)
+            if is_test:
+                CRPS, MSE = calc_metrics(is_test, all_generation, all_samples_y)
+            else:
+                CRPS, MSE = calc_metrics(is_test, all_generation, all_samples_y)
+                metrics = calc_validation_metrics(
+                    all_generation, all_samples_y, torch.cat(all_info)
+                )
+                print(
+                    'Validation (50 samples): overall CRPS={overall_crps:.4f}, '
+                    'abrupt CRPS={abrupt_crps:.4f}, normal CRPS={normal_crps:.4f}, '
+                    '95% coverage={coverage_95:.4f}'.format(**metrics)
+                )
             if is_test == 1:
                 pickle.dump([all_generation, all_samples_y, all_samples_x], open(foldername + "/generated_outputs" + str(nsample) + ".pkl", "wb"))
                 pickle.dump([CRPS, MSE], open(foldername + "/result_nsample" + str(nsample) + ".pkl", "wb"))

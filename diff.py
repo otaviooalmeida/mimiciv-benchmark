@@ -26,7 +26,7 @@ class TDSTF(nn.Module):
         
         return samples_x, samples_y, info
 
-    def forward(self, batch, size_x, size_y):
+    def forward(self, batch, size_x, size_y, abrupt_weighting=False):
         samples_x, samples_y, info = self.process(batch)
         t = torch.randint(0, self.num_steps, [len(samples_x)]).to(self.device)
         current_alpha = self.alpha_torch[t]
@@ -40,7 +40,13 @@ class TDSTF(nn.Module):
         samples_y[:, 2] = ((current_alpha ** 0.5) * samples_y[:, 2] + ((1.0 - current_alpha) ** 0.5) * noise) * mask_y
         predicted = self.res_model(samples_x, samples_y, info, t)
         residual = torch.where(mask_y == 1, noise - predicted, 0)
-        loss = (residual ** 2).sum() / info[:, 2].sum()
+        window_weights = torch.ones(len(info), device=self.device)
+        if abrupt_weighting:
+            if info.shape[1] < 4:
+                raise ValueError('Regenerate the dataset with preprocess/step_4.py for abrupt-window flags.')
+            window_weights = torch.where(info[:, 3] > 0, 1.5, 1.0).to(residual.dtype)
+        weighted_mask = mask_y * window_weights.unsqueeze(1)
+        loss = (residual ** 2 * weighted_mask).sum() / weighted_mask.sum()
 
         return loss
 

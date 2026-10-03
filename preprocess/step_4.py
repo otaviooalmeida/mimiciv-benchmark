@@ -9,6 +9,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from reproducibility import split_subjects
+from abrupt import abrupt_window_flags
 
 parser = argparse.ArgumentParser(description='Create reproducible patient-level dataset splits.')
 parser.add_argument('--seed', type=int, default=None, help='Seed used for the patient-level split.')
@@ -33,13 +34,15 @@ info = pd.DataFrame(info, columns = ['ts_ind', 'sub_id', 'x_len', 'y_len'])
 
 # Patient-wise split. Keep split membership in a sidecar for audit/reuse.
 train_sub, valid_sub, test_sub = split_subjects(info['sub_id'].to_numpy(), seed=args.seed)
+train_indices = info.index[info['sub_id'].isin(train_sub)].to_numpy()
+info['abrupt'], abrupt_thresholds = abrupt_window_flags(samples, train_indices, target_var)
 
-# normalize
+# Normalize using training subjects only; learn change thresholds from the same split.
 rec = []
 for i in range(len(var)):
     rec.append([])
     
-for sub_id in np.concatenate((train_sub, valid_sub)):
+for sub_id in train_sub:
     index = np.array(info.loc[info.sub_id == sub_id].index)
     for i in index:
         stay = samples[i]
@@ -78,4 +81,5 @@ with open('data/splits.pkl', 'wb') as split_file:
         'train_subjects': train_sub,
         'valid_subjects': valid_sub,
         'test_subjects': test_sub,
+        'abrupt_change_p95': abrupt_thresholds,
     }, split_file)
