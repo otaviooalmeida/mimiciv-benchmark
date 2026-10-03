@@ -56,7 +56,7 @@ def train(
         if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
             CRPS_valid, _ = evaluate(
-                0, model, valid_loader, nsample=50, foldername=foldername, seed=seed + 1
+                0, model, valid_loader, nsample=5, foldername=foldername, seed=seed + 1
             )
             print('{} (best)'.format(round(best_valid_loss, 4)))
             print('{} (current)'.format(round(CRPS_valid, 4)))
@@ -75,7 +75,6 @@ def train(
 
     if valid_loader is not None and best_valid_loss < np.inf:
         model.load_state_dict(torch.load(output_path))
-        evaluate(0, model, valid_loader, nsample=50, foldername=foldername, seed=seed + 1)
 
 def calc_validation_metrics(all_generation, all_samples_y, all_info):
     target = all_samples_y[:, 2]
@@ -164,9 +163,9 @@ def evaluate(is_test, model, data_loader, nsample=100, foldername="", seed=2026)
                     all_generation, all_samples_y, torch.cat(all_info)
                 )
                 print(
-                    'Validation (50 samples): overall CRPS={overall_crps:.4f}, '
+                    'Validation ({} samples): overall CRPS={overall_crps:.4f}, '
                     'abrupt CRPS={abrupt_crps:.4f}, normal CRPS={normal_crps:.4f}, '
-                    '95% coverage={coverage_95:.4f}'.format(**metrics)
+                    '95% coverage={coverage_95:.4f}'.format(nsample, **metrics)
                 )
             if is_test == 1:
                 pickle.dump([all_generation, all_samples_y, all_samples_x], open(foldername + "/generated_outputs" + str(nsample) + ".pkl", "wb"))
