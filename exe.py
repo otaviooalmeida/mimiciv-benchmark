@@ -3,8 +3,14 @@ import torch
 from torch.optim import Adam
 from tqdm import tqdm
 import pickle
+import time
 
 from reproducibility import seed_everything
+
+
+def synchronize(device):
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
 
 def train(
     model,
@@ -16,7 +22,11 @@ def train(
     seed=2026,
     abrupt_weighting=False,
 ):
+    fit_start = time.perf_counter()
     seed_everything(seed)
+    device = next(model.parameters()).device
+    train_seconds = 0.0
+    validation_seconds = 0.0
     optimizer = Adam(model.parameters(), lr=config['train']['lr'], weight_decay=5e-8)
     if foldername != '':
         output_path = foldername + '/model.pth'
@@ -31,6 +41,9 @@ def train(
     size_y = 10 * len(target_var)
     best_valid_loss = np.inf
     for epoch_no in range(config['train']['epochs']):
+        epoch_start = time.perf_counter()
+        synchronize(device)
+        train_start = time.perf_counter()
         avg_loss = 0
         model.train()
         with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
@@ -53,11 +66,21 @@ def train(
                 )
                 
             lr_scheduler.step()
+        synchronize(device)
+        epoch_train_seconds = time.perf_counter() - train_start
+        train_seconds += epoch_train_seconds
+        epoch_validation_seconds = 0.0
+        stop_early = False
         if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
+            synchronize(device)
+            validation_start = time.perf_counter()
             CRPS_valid, _ = evaluate(
                 0, model, valid_loader, nsample=5, foldername=foldername, seed=seed + 1
             )
+            synchronize(device)
+            epoch_validation_seconds = time.perf_counter() - validation_start
+            validation_seconds += epoch_validation_seconds
             print('{} (best)'.format(round(best_valid_loss, 4)))
             print('{} (current)'.format(round(CRPS_valid, 4)))
             if best_valid_loss > CRPS_valid:
@@ -71,10 +94,24 @@ def train(
             # earlystopping
             if ct > 2:
                 print('stop')
-                break
+                stop_early = True
+        print(
+            'Timing epoch {}: train={:.1f}s, validation={:.1f}s, wall={:.1f}s'.format(
+                epoch_no + 1, epoch_train_seconds, epoch_validation_seconds,
+                time.perf_counter() - epoch_start,
+            )
+        )
+        if stop_early:
+            break
 
     if valid_loader is not None and best_valid_loss < np.inf:
         model.load_state_dict(torch.load(output_path))
+    synchronize(device)
+    print(
+        'Fit timing: train={:.1f}s, validation={:.1f}s, total={:.1f}s'.format(
+            train_seconds, validation_seconds, time.perf_counter() - fit_start,
+        )
+    )
 
 def calc_validation_metrics(all_generation, all_samples_y, all_info):
     target = all_samples_y[:, 2]
