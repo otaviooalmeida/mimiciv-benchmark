@@ -18,15 +18,12 @@ from reproducibility import seed_everything, validate_split_seed
 
 
 TARGET_UNITS = {
-    "HR": "bpm", "SBP": "mmHg", "DBP": "mmHg", "Temperature": "°C", "O2 Saturation": "%",
-    "SBP (Arterial)": "mmHg", "SBP (Non-Invasive)": "mmHg",
-    "DBP (Arterial)": "mmHg", "DBP (Non-Invasive)": "mmHg",
-    "O2 Saturation (Pulse Oximetry)": "%", "O2 Saturation (Arterial)": "%",
+    "HR": "bpm", "SBP (Non-Invasive)": "mmHg", "Temperature": "°C",
+    "O2 Saturation (Pulse Oximetry)": "%", "RR": "breaths/min",
 }
 TARGET_DISPLAY_NAMES = {
-    "O2 Saturation": "SpO₂",
     "O2 Saturation (Pulse Oximetry)": "SpO₂ (pulse oximetry)",
-    "O2 Saturation (Arterial)": "SaO₂ (arterial)",
+    "RR": "Respiratory rate",
 }
 
 

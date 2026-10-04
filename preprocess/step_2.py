@@ -53,9 +53,8 @@ events['ts_ind'] = events.ICUSTAY_ID.map(icustay_to_ind)
 # Rename some columns.
 events.rename(columns={'rel_charttime':'minute', 'NAME':'variable', 'VALUENUM':'value'}, inplace=True)
 target_names = [
-    'HR', 'SBP (Arterial)', 'SBP (Non-Invasive)', 'DBP (Arterial)',
-    'DBP (Non-Invasive)', 'Temperature', 'O2 Saturation (Pulse Oximetry)',
-    'O2 Saturation (Arterial)',
+    'HR', 'SBP (Non-Invasive)', 'Temperature',
+    'O2 Saturation (Pulse Oximetry)', 'RR',
 ]
 events.loc[events.variable.isin(target_names)].groupby(['variable', 'VALUEUOM']).value.agg(['count', 'min', 'max']).to_csv('data/target_value_audit.csv')
 
